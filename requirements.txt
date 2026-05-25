@@ -1,0 +1,25 @@
+# Music Video Generator – Dependencies
+
+# Audio analysis
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Array math
+numpy>=1.24.0,<2.0.0
+
+
+# Video assembly
+moviepy>=2.0.0
+
+# Image & Video Processing
+opencv-python>=4.8.0,<4.9.0
+
+
+# AI Upscaling
+realesrgan>=0.3.0
+basicsr>=1.4.2
+
+# Pipeline Manager GUI
+ttkbootstrap>=1.10.0
+watchdog>=3.0.0
+Pillow>=10.0.0

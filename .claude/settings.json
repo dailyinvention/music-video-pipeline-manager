@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python video_mod.py --upscale-frames frames_4k/ -r 4k --ai-upscale)"
+    ]
+  }
+}
