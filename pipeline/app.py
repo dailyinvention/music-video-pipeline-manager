@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttk
@@ -872,6 +873,7 @@ class PipelineApp(ttk.Window):
             self.conn, pid,
             status="queued",
             current_step=0,
+            queued_at=datetime.now().isoformat(),
             error_message="",
         )
         # Clear old process logs
@@ -887,6 +889,7 @@ class PipelineApp(ttk.Window):
             self.conn, pid,
             status="staged",
             current_step=0,
+            queued_at=None,
             error_message="",
         )
         # Clear old process logs

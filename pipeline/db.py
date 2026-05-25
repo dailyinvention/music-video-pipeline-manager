@@ -83,6 +83,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
                 conn.execute(f"ALTER TABLE projects ADD COLUMN {col} INTEGER DEFAULT 1")
             except sqlite3.OperationalError:
                 pass
+        try:
+            conn.execute("ALTER TABLE projects ADD COLUMN queued_at TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     return conn
 
@@ -147,10 +151,16 @@ def get_all_projects(conn: sqlite3.Connection) -> list[dict]:
 
 def get_projects_by_status(conn: sqlite3.Connection,
                            status: str) -> list[dict]:
-    rows = conn.execute(
-        "SELECT * FROM projects WHERE status = ? ORDER BY created_at ASC",
-        (status,),
-    ).fetchall()
+    if status == "queued":
+        rows = conn.execute(
+            "SELECT * FROM projects WHERE status = ? ORDER BY COALESCE(queued_at, created_at) ASC, id ASC",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM projects WHERE status = ? ORDER BY created_at ASC",
+            (status,),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
