@@ -9,7 +9,7 @@ import os
 import sys
 import threading
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttk
@@ -150,11 +150,11 @@ class PipelineApp(ttk.Window):
         list_frame.pack(fill=BOTH, expand=True)
 
         self._tree = ttk.Treeview(
-            list_frame, columns=("status",), show="tree",
+            list_frame, columns=("reorder",), show="tree",
             selectmode="browse", style="dark.Treeview",
         )
-        self._tree.column("#0", width=250)
-        self._tree.column("status", width=80, anchor=CENTER)
+        self._tree.column("#0", width=220)
+        self._tree.column("reorder", width=46, anchor=CENTER, stretch=False)
         self._tree.pack(fill=BOTH, expand=True, side=LEFT)
 
         tree_scroll = ttk.Scrollbar(
@@ -164,6 +164,7 @@ class PipelineApp(ttk.Window):
         self._tree.configure(yscrollcommand=tree_scroll.set)
 
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
+        self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
 
         # Right: detail panel
         right = ttk.Frame(paned, padding=10)
@@ -243,21 +244,22 @@ class PipelineApp(ttk.Window):
             bootstyle=f"inverse-{badge_style}",
         ).pack(side=RIGHT)
 
-        # Error message
-        if status == "error" and project.get("error_message"):
+        # Error / last-run message (show on any status if present)
+        if project.get("error_message"):
             err_frame = ttk.Frame(f)
             err_frame.pack(fill=X, pady=(0, 10))
             ttk.Label(
                 err_frame,
-                text=f"⚠ {project['error_message']}",
+                text=f"Last error: {project['error_message']}",
                 bootstyle="danger",
                 wraplength=700,
             ).pack(fill=X)
-            ttk.Button(
-                err_frame, text="Retry",
-                bootstyle="warning",
-                command=lambda: self._queue_project(pid),
-            ).pack(anchor=E, pady=5)
+            if status == "error":
+                ttk.Button(
+                    err_frame, text="Retry",
+                    bootstyle="warning",
+                    command=lambda: self._queue_project(pid),
+                ).pack(anchor=E, pady=5)
 
         # Processing progress
         if status == "processing":
@@ -1100,6 +1102,9 @@ class PipelineApp(ttk.Window):
                 groups[s] = []
             groups[s].append(p)
 
+        # Sort the queued group by execution order: oldest queued first
+        groups["queued"].sort(key=lambda x: (x.get("queued_at") or x.get("created_at") or "", x.get("id", 0)))
+
         for status, items in groups.items():
             if not items:
                 continue
@@ -1116,7 +1121,7 @@ class PipelineApp(ttk.Window):
                 display = p["name"]
                 if status == "processing":
                     step = p.get("current_step", 0)
-                    display += f"  (Step {step}/6)"
+                    display += f"  (Step {step}/9)"
                 self._tree.insert(
                     group_id, "end",
                     text=f"  {display}",
@@ -1135,6 +1140,61 @@ class PipelineApp(ttk.Window):
         self._tree.tag_configure("item_processing", foreground="#5bc0de")
         self._tree.tag_configure("item_done", foreground="#5cb85c")
         self._tree.tag_configure("item_error", foreground="#d9534f")
+        self._tree.tag_configure("reorder_arrow", foreground="#cccccc")
+
+    # ------------------------------------------------------------------
+    # Queue Reorder (inline column click)
+    # ------------------------------------------------------------------
+
+    def _on_tree_click(self, event):
+        """Detect clicks on the 'reorder' column and move the queued item up/down."""
+        col = self._tree.identify_column(event.x)
+        if col != "#1":  # #1 = first data column = 'reorder'
+            return
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return
+        tags = self._tree.item(iid, "tags")
+        if "item_queued" not in tags:
+            return
+        # Left half of the column = up, right half = down
+        col_x = self._tree.column("reorder", "x")
+        col_w = self._tree.column("reorder", "width")
+        mid = col_x + col_w // 2
+        direction = -1 if event.x < mid else 1
+        self._reorder_queue_item(iid, direction)
+
+    def _reorder_queue_item(self, iid: str, direction: int):
+        """Move a queued project up (-1) or down (+1) by swapping queued_at timestamps."""
+        values = self._tree.item(iid, "values")
+        if not values:
+            return
+        try:
+            pid = int(values[0])
+        except (ValueError, IndexError):
+            return
+
+        queued = db.get_projects_by_status(self.conn, "queued")
+        ids = [p["id"] for p in queued]
+        if pid not in ids:
+            return
+
+        idx = ids.index(pid)
+        swap_idx = idx + direction
+        if swap_idx < 0 or swap_idx >= len(ids):
+            return  # Already at top/bottom
+
+        p_a = queued[idx]
+        p_b = queued[swap_idx]
+        ts_a = p_a.get("queued_at") or p_a.get("created_at") or datetime.now().isoformat()
+        ts_b = p_b.get("queued_at") or p_b.get("created_at") or datetime.now().isoformat()
+
+        if ts_a == ts_b:
+            ts_a = (datetime.fromisoformat(ts_a) - timedelta(milliseconds=1)).isoformat()
+
+        db.update_project(self.conn, p_a["id"], queued_at=ts_b)
+        db.update_project(self.conn, p_b["id"], queued_at=ts_a)
+        self._refresh_list()
 
     def _on_select(self, event):
         sel = self._tree.selection()

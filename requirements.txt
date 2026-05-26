@@ -23,3 +23,6 @@ basicsr>=1.4.2
 ttkbootstrap>=1.10.0
 watchdog>=3.0.0
 Pillow>=10.0.0
+
+# REST API Server
+Flask>=2.2.0
