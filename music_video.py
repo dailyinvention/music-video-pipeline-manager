@@ -21,7 +21,8 @@ import sys
 
 import numpy as np
 import librosa
-from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
+from moviepy import ImageClip, AudioFileClip, concatenate_videoclips, CompositeAudioClip
+import cv2
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +552,6 @@ def render_fractal_image(
     if brightness != 1.0:
         print(f"  Brightness: {brightness:.2f}x")
 
-    import cv2
     frame = render_fractal_flame(
         width, height,
         c[0], c[1],
@@ -593,6 +593,8 @@ def create_fractal_video(
     beat_dynamics: float = 0.0,
     randomize: bool = False,
     preset_file: str = "",
+    watermark: str = "music_to_sleep_to_profile.png",
+    negative_logo: bool = False,
 ):
     """
     loop_close_secs  – if > 0, append this many silent seconds after the
@@ -660,6 +662,36 @@ def create_fractal_video(
               f"({close_actual} frames, silent)")
     if render_secs > 0:
         print(f"  Preview mode: rendering first {render_dur:.1f}s only")
+
+    # Load watermark if specified and exists
+    watermark_data = None
+    if watermark and watermark.lower() not in ("none", "") and os.path.exists(watermark):
+        try:
+            logo = cv2.imread(watermark, cv2.IMREAD_UNCHANGED)
+            if logo is not None and len(logo.shape) == 3 and logo.shape[2] == 4:
+                # Resize logo to fit in bottom right corner (12% of video height)
+                w_h = int(height * 0.12)
+                aspect_ratio = logo.shape[1] / logo.shape[0]
+                w_w = int(w_h * aspect_ratio)
+                logo = cv2.resize(logo, (w_w, w_h))
+                
+                logo_rgb = cv2.cvtColor(logo[:, :, :3], cv2.COLOR_BGR2RGB)
+                if negative_logo:
+                    logo_rgb = 255 - logo_rgb
+                logo_alpha = (logo[:, :, 3] / 255.0) * 0.4  # 40% opacity
+                
+                # Bottom-right position with 2% padding
+                pad_x = int(width * 0.02)
+                pad_y = int(height * 0.02)
+                y1 = height - pad_y - w_h
+                y2 = height - pad_y
+                x1 = width - pad_x - w_w
+                x2 = width - pad_x
+                
+                watermark_data = (logo_rgb, logo_alpha, y1, y2, x1, x2)
+                print(f"  Watermark loaded: {watermark} ({w_w}x{w_h} at bottom-right)")
+        except Exception as e:
+            print(f"  Warning: could not load watermark: {e}")
 
     rotation_acc = 0.0
     all_frames   = []
@@ -733,6 +765,10 @@ def create_fractal_video(
             palette_t, palette_idx,
             energy, effective_beat if not in_close else 0.0,
         )
+        if watermark_data is not None:
+            w_rgb, w_alpha, wy1, wy2, wx1, wx2 = watermark_data
+            for c in range(3):
+                frame[wy1:wy2, wx1:wx2, c] = (w_alpha * w_rgb[:, :, c] + (1.0 - w_alpha) * frame[wy1:wy2, wx1:wx2, c])
         all_frames.append(frame)
 
         if (fi + 1) % (fps * 5) == 0 or fi == render_limit - 1:
@@ -756,15 +792,28 @@ def create_fractal_video(
         audio    = audio.audio_fadeout(fade_dur)
 
     # Attach audio; video frames beyond audio duration play in silence
-    video = video.with_audio(audio)
+    # Set the duration of the audio to match the video clip using CompositeAudioClip to guarantee silence at the end
+    padded_audio = CompositeAudioClip([audio]).with_duration(video.duration)
+    video = video.with_audio(padded_audio)
 
     print(f"\nEncoding to {output_path} ...")
+    import sys
+    if sys.platform == "darwin":
+        vcodec = "hevc_videotoolbox"
+        preset = None
+        ffmpeg_params = ["-q:v", "65"]
+    else:
+        vcodec = "libx265"
+        preset = "medium"
+        ffmpeg_params = ["-crf", "18"]
+
     video.write_videofile(
         output_path,
         fps=fps,
-        codec="libx264",
+        codec=vcodec,
         audio_codec="aac",
-        preset="medium",
+        preset=preset,
+        ffmpeg_params=ffmpeg_params,
         threads=os.cpu_count() or 4,
     )
 
@@ -849,6 +898,10 @@ def main():
     parser.add_argument("--preset-file", "-p", default="",
                         metavar="PATH",
                         help="JSON file to save/load the preset sequence.")
+    parser.add_argument("--watermark", default="music_to_sleep_to_profile.png",
+                        help="Path to transparent PNG watermark (default: music_to_sleep_to_profile.png).")
+    parser.add_argument("--negative-logo", action="store_true",
+                        help="Invert the watermark logo colors (negative).")
 
     args = parser.parse_args()
 
@@ -898,6 +951,8 @@ def main():
             beat_dynamics=args.beat_dynamics,
             randomize=args.randomize,
             preset_file=args.preset_file,
+            watermark=args.watermark,
+            negative_logo=args.negative_logo,
         )
 
 

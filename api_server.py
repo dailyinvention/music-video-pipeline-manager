@@ -88,6 +88,7 @@ def upload_project():
         skip_shorts = int(request.form.get("skip_shorts", 0))
         process_facebook = int(request.form.get("process_facebook", 1))
         process_youtube = int(request.form.get("process_youtube", 1))
+        negative_logo = int(request.form.get("negative_logo", 0))
         overlay_text = request.form.get("overlay_text", "")
         font_size = int(request.form.get("font_size", 90))
         loop_pick = int(request.form.get("loop_pick", 1))
@@ -105,7 +106,8 @@ def upload_project():
             facebook_audio=saved_files.get("facebook_audio", ""),
             skip_shorts=skip_shorts,
             process_facebook=process_facebook,
-            process_youtube=process_youtube
+            process_youtube=process_youtube,
+            negative_logo=negative_logo
         )
         
         # Update settings

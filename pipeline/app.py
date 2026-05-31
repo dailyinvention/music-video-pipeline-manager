@@ -388,7 +388,16 @@ class PipelineApp(ttk.Window):
             state="normal" if is_editable else "disabled",
             bootstyle="success-square-toggle"
         )
-        self._proc_shorts_chk.pack(side=LEFT)
+        self._proc_shorts_chk.pack(side=LEFT, padx=(0, 20))
+
+        self._neg_logo_var = tk.BooleanVar(value=bool(project.get("negative_logo", 0)))
+        self._neg_logo_chk = ttk.Checkbutton(
+            settings_frame, text="Negative Logo",
+            variable=self._neg_logo_var,
+            state="normal" if is_editable else "disabled",
+            bootstyle="success-square-toggle"
+        )
+        self._neg_logo_chk.pack(side=LEFT)
 
         # Separator
         ttk.Separator(f).pack(fill=X, pady=10)
@@ -815,6 +824,7 @@ class PipelineApp(ttk.Window):
             skip_shorts=int(not self._proc_shorts_var.get()),
             process_facebook=int(self._proc_fb_var.get()),
             process_youtube=int(self._proc_yt_var.get()),
+            negative_logo=int(self._neg_logo_var.get()),
             overlay_text=text,
             font_size=self._fontsize_var.get(),
             fade_in_start=self._fi_start_var.get(),

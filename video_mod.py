@@ -476,6 +476,53 @@ def center_crop(frame: np.ndarray, ratio_w: int, ratio_h: int) -> np.ndarray:
         return frame[y_off:y_off + new_h, :]
 
 
+def load_watermark_data(watermark_path: str, video_w: int, video_h: int, negative: bool = False) -> tuple | None:
+    """
+    Load a watermark PNG image, calculate coordinates, optionally invert colors,
+    and return blending parameters (logo_bgr, logo_alpha, y1, y2, x1, x2).
+    """
+    if not watermark_path or watermark_path.lower() in ("none", "") or not os.path.exists(watermark_path):
+        return None
+    try:
+        logo = cv2.imread(watermark_path, cv2.IMREAD_UNCHANGED)
+        if logo is not None and len(logo.shape) == 3 and logo.shape[2] == 4:
+            # Resize logo to fit in bottom right corner (12% of video height)
+            w_h = int(video_h * 0.12)
+            aspect_ratio = logo.shape[1] / logo.shape[0]
+            w_w = int(w_h * aspect_ratio)
+            logo = cv2.resize(logo, (w_w, w_h))
+            
+            logo_bgr = logo[:, :, :3]
+            if negative:
+                logo_bgr = 255 - logo_bgr
+                
+            logo_alpha = (logo[:, :, 3] / 255.0) * 0.4  # 40% opacity
+            
+            # Bottom-right position with 2% padding
+            pad_x = int(video_w * 0.02)
+            pad_y = int(video_h * 0.02)
+            y1 = video_h - pad_y - w_h
+            y2 = video_h - pad_y
+            x1 = video_w - pad_x - w_w
+            x2 = video_w - pad_x
+            
+            return (logo_bgr, logo_alpha, y1, y2, x1, x2)
+    except Exception as e:
+        print(f"  Warning: could not load watermark: {e}")
+    return None
+
+
+def apply_watermark(frame: np.ndarray, watermark_data: tuple | None) -> np.ndarray:
+    """
+    Apply preloaded watermark data to an image frame.
+    """
+    if watermark_data is not None:
+        w_bgr, w_alpha, wy1, wy2, wx1, wx2 = watermark_data
+        for c in range(3):
+            frame[wy1:wy2, wx1:wx2, c] = (w_alpha * w_bgr[:, :, c] + (1.0 - w_alpha) * frame[wy1:wy2, wx1:wx2, c])
+    return frame
+
+
 # ---------------------------------------------------------------------------
 # Main processing pipeline
 # ---------------------------------------------------------------------------
@@ -492,7 +539,7 @@ def process_video(
     orton_strength: float = 0.7,
     enhance_details: bool = False,
     sharpen_only: bool = False,
-    codec: str = "h264",
+    codec: str = "h265",
     crf: int = 18,
     ai_upscale: bool = False,
     ai_backend: str = "realesrgan",
@@ -504,6 +551,8 @@ def process_video(
     frames_only: bool = False,
     crop_ratio: tuple[int, int] | None = None,
     tile_size: int | None = None,
+    watermark: str = "music_to_sleep_to_profile.png",
+    negative_logo: bool = False,
 ):
     """
     Read input video, upscale and process each frame, write to temp file,
@@ -653,6 +702,13 @@ def process_video(
     if not writer.isOpened():
         sys.exit("Error: could not create video writer")
 
+    # Load watermark if specified and exists
+    watermark_data = load_watermark_data(watermark, out_w, out_h, negative_logo)
+    if watermark_data is not None:
+        w_w = watermark_data[5] - watermark_data[4]
+        w_h = watermark_data[3] - watermark_data[2]
+        print(f"  Watermark loaded: {watermark} ({w_w}x{w_h} at bottom-right)")
+
     frame_num = checkpoint_resume
     frame_times = []
     print(f"\nProcessing frames...")
@@ -720,6 +776,8 @@ def process_video(
         # 6. Crop to target aspect ratio
         if do_crop:
             frame = center_crop(frame, crop_ratio[0], crop_ratio[1])
+
+        frame = apply_watermark(frame, watermark_data)
 
         if save_frames:
             png_path = os.path.join(frames_dir, f"frame_{frame_num:06d}.png")
@@ -797,7 +855,12 @@ def process_video(
     # --- Mux processed video with original audio via ffmpeg ---
     print(f"\nEncoding final video with ffmpeg ({codec}, CRF {crf})...")
 
-    vcodec = "libx265" if codec.lower() in ("h265", "hevc") else "libx264"
+    import sys
+    if codec.lower() in ("h265", "hevc"):
+        vcodec = "hevc_videotoolbox" if sys.platform == "darwin" else "libx265"
+    else:
+        vcodec = "h264_videotoolbox" if sys.platform == "darwin" else "libx264"
+
     pix_fmt = "yuv420p"
 
     cmd = [
@@ -807,8 +870,15 @@ def process_video(
         "-map", "0:v:0",         # video from processed
         "-map", "1:a:0?",        # audio from original (if exists)
         "-c:v", vcodec,
-        "-crf", str(crf),
-        "-preset", "slow",
+    ]
+    if "videotoolbox" in vcodec:
+        # videotoolbox quality: 0-100 scale. CRF 18 maps to 70; CRF 23 maps to 58; CRF 28 maps to 45.
+        q_val = max(1, min(100, int(round(115 - 2.5 * crf))))
+        cmd += ["-q:v", str(q_val)]
+    else:
+        cmd += ["-crf", str(crf), "-preset", "slow"]
+
+    cmd += [
         "-pix_fmt", pix_fmt,
         "-c:a", "aac",
         "-b:a", "320k",
@@ -899,12 +969,20 @@ def main():
         help="Apply effects without changing resolution.",
     )
     parser.add_argument(
-        "--codec", choices=["h264", "h265"], default="h264",
-        help="Output codec (default: h264). h265 = smaller files.",
+        "--codec", choices=["h264", "h265"], default="h265",
+        help="Output codec (default: h265). Uses Apple Silicon hardware acceleration on macOS.",
     )
     parser.add_argument(
         "--crf", type=int, default=18,
         help="Quality (0=lossless, 18=high, 23=default, 28=low). Default: 18.",
+    )
+    parser.add_argument(
+        "--watermark", default="music_to_sleep_to_profile.png",
+        help="Path to transparent PNG watermark (default: music_to_sleep_to_profile.png).",
+    )
+    parser.add_argument(
+        "--negative-logo", action="store_true",
+        help="Invert the watermark logo colors (negative).",
     )
     parser.add_argument(
         "--ai-upscale", action="store_true",
@@ -1049,7 +1127,11 @@ def main():
         if not frames:
             sys.exit(f"Error: no PNG frames found in {args.combine_frames}")
         print(f"Combining {len(frames)} frames from {args.combine_frames} → {args.output}")
-        codec_name = "libx265" if args.codec.lower() in ("h265", "hevc") else "libx264"
+        import sys
+        if args.codec.lower() in ("h265", "hevc"):
+            codec_name = "hevc_videotoolbox" if sys.platform == "darwin" else "libx265"
+        else:
+            codec_name = "h264_videotoolbox" if sys.platform == "darwin" else "libx264"
         fps = 30.0
         # Use input video framerate if provided
         if args.input and os.path.isfile(args.input):
@@ -1075,8 +1157,13 @@ def main():
                     "-c:a", "aac", "-b:a", "320k"]
         cmd += [
             "-c:v", codec_name,
-            "-crf", str(args.crf),
-            "-preset", "slow",
+        ]
+        if "videotoolbox" in codec_name:
+            q_val = max(1, min(100, int(round(115 - 2.5 * args.crf))))
+            cmd += ["-q:v", str(q_val)]
+        else:
+            cmd += ["-crf", str(args.crf), "-preset", "slow"]
+        cmd += [
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             "-r", str(fps),
@@ -1274,6 +1361,8 @@ def main():
         frames_only=args.frames_only,
         crop_ratio=crop_ratio,
         tile_size=args.tile,
+        watermark=args.watermark,
+        negative_logo=args.negative_logo,
     )
 
 

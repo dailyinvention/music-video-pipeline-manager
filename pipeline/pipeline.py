@@ -318,8 +318,9 @@ class PipelineWorker:
             get_binary_path("ffmpeg"), "-y",
             "-i", fb_video,
             "-i", merge_audio,
+            "-filter_complex", "[1:a]apad[aout]",
             "-map", "0:v:0",
-            "-map", "1:a:0",
+            "-map", "[aout]",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "320k",
             "-shortest",
@@ -342,7 +343,10 @@ class PipelineWorker:
         if not os.path.isfile(merged_fb):
             raise RuntimeError(f"Merged Facebook video not found: {merged_fb}")
 
-        ok, log = _run_python_script("video_mod", ["-i", merged_fb, "-o", output_fb, "-r", "4k", "--ai-upscale"], log_callback)
+        args = ["-i", merged_fb, "-o", output_fb, "-r", "4k", "--ai-upscale"]
+        if project.get("negative_logo", 0):
+            args.append("--negative-logo")
+        ok, log = _run_python_script("video_mod", args, log_callback)
         if not ok:
             raise RuntimeError(f"Facebook Upscale failed: {log}")
         return output_fb, log
@@ -378,8 +382,9 @@ class PipelineWorker:
             get_binary_path("ffmpeg"), "-y",
             "-i", yt_video,
             "-i", audio,
+            "-filter_complex", "[1:a]apad[aout]",
             "-map", "0:v:0",
-            "-map", "1:a:0",
+            "-map", "[aout]",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "320k",
             "-shortest",
@@ -402,7 +407,10 @@ class PipelineWorker:
         if not os.path.isfile(merged_yt):
             raise RuntimeError(f"Merged YouTube video not found: {merged_yt}")
 
-        ok, log = _run_python_script("video_mod", ["-i", merged_yt, "-o", output_yt, "-r", "4k", "--ai-upscale"], log_callback)
+        args = ["-i", merged_yt, "-o", output_yt, "-r", "4k", "--ai-upscale"]
+        if project.get("negative_logo", 0):
+            args.append("--negative-logo")
+        ok, log = _run_python_script("video_mod", args, log_callback)
         if not ok:
             raise RuntimeError(f"YouTube Upscale failed: {log}")
         return output_yt, log
@@ -456,11 +464,14 @@ class PipelineWorker:
         if not os.path.isfile(loop_file):
             raise RuntimeError(f"Loop video not found: {loop_file}")
 
-        ok, log = _run_python_script("video_mod", [
+        args = [
             "--crop", "9:16",
             "-i", loop_file,
             "-o", cropped,
-        ], log_callback)
+        ]
+        if project.get("negative_logo", 0):
+            args.append("--negative-logo")
+        ok, log = _run_python_script("video_mod", args, log_callback)
         if not ok:
             raise RuntimeError(f"Crop failed: {log}")
         return cropped, log

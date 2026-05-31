@@ -48,7 +48,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
                 total_steps     INTEGER DEFAULT 6,
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                error_message   TEXT DEFAULT ''
+                error_message   TEXT DEFAULT '',
+                negative_logo   INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS process_log (
@@ -87,6 +88,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
             conn.execute("ALTER TABLE projects ADD COLUMN queued_at TIMESTAMP")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE projects ADD COLUMN negative_logo INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     return conn
 
@@ -100,14 +105,14 @@ def create_project(conn: sqlite3.Connection, folder_path: str,
                    audio_file: str = "", facebook_video: str = "",
                    youtube_video: str = "", facebook_audio: str = "",
                    skip_shorts: int = 0, process_facebook: int = 1,
-                   process_youtube: int = 1) -> int:
+                   process_youtube: int = 1, negative_logo: int = 0) -> int:
     """Insert a new project. Returns the new row id."""
     with _lock:
         cur = conn.execute(
             """INSERT OR IGNORE INTO projects
-               (folder_path, name, video_file, audio_file, facebook_video, youtube_video, facebook_audio, skip_shorts, process_facebook, process_youtube)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (folder_path, name, video_file or youtube_video, audio_file, facebook_video, youtube_video or video_file, facebook_audio, skip_shorts, process_facebook, process_youtube),
+               (folder_path, name, video_file, audio_file, facebook_video, youtube_video, facebook_audio, skip_shorts, process_facebook, process_youtube, negative_logo)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (folder_path, name, video_file or youtube_video, audio_file, facebook_video, youtube_video or video_file, facebook_audio, skip_shorts, process_facebook, process_youtube, negative_logo),
         )
         conn.commit()
         return cur.lastrowid

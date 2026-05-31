@@ -41,13 +41,20 @@ def create_proxy(video_path: str, audio_path: str,
     Returns True on success.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    import sys
+    if sys.platform == "darwin":
+        codec_args = ["-c:v", "h264_videotoolbox", "-q:v", "50"]
+    else:
+        codec_args = ["-c:v", "libx264", "-crf", "28", "-preset", "ultrafast"]
+
     cmd = [
         get_binary_path("ffmpeg"), "-y",
         "-i", video_path,
         "-i", audio_path,
+        "-filter_complex", "[1:a]apad[aout]",
         "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+        "-map", "[aout]",
+    ] + codec_args + [
         "-vf", f"scale=-2:{height}",
         "-c:a", "aac", "-b:a", "128k",
         "-shortest",
@@ -113,8 +120,14 @@ def export_preview_clip(proxy_path: str, candidate: dict,
         cmd += ["-vf", ",".join(vf_parts)]
     if af_parts:
         cmd += ["-af", ",".join(af_parts)]
-    cmd += [
-        "-c:v", "libx264", "-crf", "26", "-preset", "fast",
+
+    import sys
+    if sys.platform == "darwin":
+        codec_args = ["-c:v", "h264_videotoolbox", "-q:v", "55"]
+    else:
+        codec_args = ["-c:v", "libx264", "-crf", "26", "-preset", "fast"]
+
+    cmd += codec_args + [
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,

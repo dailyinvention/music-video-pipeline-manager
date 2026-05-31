@@ -284,7 +284,12 @@ def overlay_text(
     codec: str,
     crf: int,
 ):
-    vcodec = "libx265" if codec.lower() in ("h265", "hevc") else "libx264"
+    import sys
+    if codec.lower() in ("h265", "hevc"):
+        vcodec = "hevc_videotoolbox" if sys.platform == "darwin" else "libx265"
+    else:
+        vcodec = "h264_videotoolbox" if sys.platform == "darwin" else "libx264"
+
     fc = build_overlay_filter(fade_in, fade_out, duration)
 
     cmd = [
@@ -295,8 +300,14 @@ def overlay_text(
         "-map", "[vout]",
         "-map", "0:a?",
         "-c:v", vcodec,
-        "-crf", str(crf),
-        "-preset", "slow",
+    ]
+    if "videotoolbox" in vcodec:
+        q_val = max(1, min(100, int(round(115 - 2.5 * crf))))
+        cmd += ["-q:v", str(q_val)]
+    else:
+        cmd += ["-crf", str(crf), "-preset", "slow"]
+
+    cmd += [
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "320k",
@@ -390,8 +401,8 @@ def main():
         help="Fade out from START to END seconds (e.g. --fade-out 8 10).",
     )
     parser.add_argument(
-        "--codec", choices=["h264", "h265"], default="h264",
-        help="Output codec (default: h264).",
+        "--codec", choices=["h264", "h265"], default="h265",
+        help="Output codec (default: h265). Uses Apple Silicon hardware acceleration on macOS.",
     )
     parser.add_argument(
         "--crf", type=int, default=18,
