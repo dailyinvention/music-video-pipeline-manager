@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Database layer for the Music Video Pipeline Manager.
 
@@ -49,7 +51,19 @@ def init_db(db_path: str) -> sqlite3.Connection:
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 error_message   TEXT DEFAULT '',
-                negative_logo   INTEGER DEFAULT 0
+                negative_logo   INTEGER DEFAULT 0,
+                fb_post_body    TEXT DEFAULT '',
+                yt_title_body   TEXT DEFAULT '',
+                yt_description_body TEXT DEFAULT '',
+                short_title_body TEXT DEFAULT '',
+                short_description_body TEXT DEFAULT '',
+                fb_schedule_time TEXT DEFAULT '',
+                yt_schedule_time TEXT DEFAULT '',
+                short_schedule_time TEXT DEFAULT '',
+                description_body TEXT DEFAULT '',
+                fb_upload_status TEXT DEFAULT 'pending',
+                yt_upload_status TEXT DEFAULT 'pending',
+                short_upload_status TEXT DEFAULT 'pending'
             );
 
             CREATE TABLE IF NOT EXISTS process_log (
@@ -92,6 +106,16 @@ def init_db(db_path: str) -> sqlite3.Connection:
             conn.execute("ALTER TABLE projects ADD COLUMN negative_logo INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        for col in ["fb_post_body", "yt_title_body", "yt_description_body", "short_title_body", "short_description_body", "fb_schedule_time", "yt_schedule_time", "short_schedule_time", "description_body"]:
+            try:
+                conn.execute(f"ALTER TABLE projects ADD COLUMN {col} TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+        for col in ["fb_upload_status", "yt_upload_status", "short_upload_status"]:
+            try:
+                conn.execute(f"ALTER TABLE projects ADD COLUMN {col} TEXT DEFAULT 'pending'")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
     return conn
 

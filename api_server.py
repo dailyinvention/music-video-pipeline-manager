@@ -94,6 +94,14 @@ def upload_project():
         loop_pick = int(request.form.get("loop_pick", 1))
         loop_fade = float(request.form.get("loop_fade", 2.0))
         
+        fb_post_body = request.form.get("fb_post_body", "")
+        yt_title_body = request.form.get("yt_title_body", "")
+        yt_description_body = request.form.get("yt_description_body", "")
+        short_title_body = request.form.get("short_title_body", "")
+        short_description_body = request.form.get("short_description_body", "")
+        fb_schedule_time = request.form.get("fb_schedule_time", "")
+        yt_schedule_time = request.form.get("yt_schedule_time", "")
+        
         # 4. Insert project
         pid = db.create_project(
             conn,
@@ -116,7 +124,14 @@ def upload_project():
             overlay_text=overlay_text,
             font_size=font_size,
             loop_pick=loop_pick,
-            loop_fade=loop_fade
+            loop_fade=loop_fade,
+            fb_post_body=fb_post_body,
+            yt_title_body=yt_title_body,
+            yt_description_body=yt_description_body,
+            short_title_body=short_title_body,
+            short_description_body=short_description_body,
+            fb_schedule_time=fb_schedule_time,
+            yt_schedule_time=yt_schedule_time
         )
         
         # 5. Automatically Queue if requested

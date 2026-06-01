@@ -26,3 +26,10 @@ Pillow>=10.0.0
 
 # REST API Server
 Flask>=2.2.0
+
+# API & Uploads
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+requests>=2.31.0
+

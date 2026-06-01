@@ -93,6 +93,9 @@ STEP_NAMES = {
     7: "Create Loop",
     8: "Crop 9:16",
     9: "Text Overlay",
+    10: "Upload Facebook Video",
+    11: "Upload YouTube Video",
+    12: "Upload YouTube Short",
 }
 
 
@@ -224,8 +227,8 @@ class PipelineWorker:
             # --- Step 9: Text Overlay ---
             self._run_step(pid, 9, folder, project)
 
-            db.update_project(self.conn, pid, status="done", current_step=9)
-            self._notify(pid, 9, "done", f"Complete: {name}")
+            db.update_project(self.conn, pid, status="pending_deployment", current_step=9)
+            self._notify(pid, 9, "done", f"Complete: {name} (Pending Deployment)")
 
         except PipelineError as e:
             db.update_project(
