@@ -1347,7 +1347,7 @@ def upload_to_tiktok(
     title: str = "",
     description: str = "",
     schedule_time_iso: str = "",
-    privacy_level: str = "PUBLIC_TO_EVERYONE",
+    privacy_level: str = "SELF_ONLY",
     tags: list[str] = None,
     log_callback=None,
     conn=None
@@ -1367,6 +1367,9 @@ def upload_to_tiktok(
     if file_size == 0:
         return "", f"Video file is empty: {video_path}"
 
+    if conn and (not privacy_level or privacy_level == "SELF_ONLY"):
+        privacy_level = db.get_setting(conn, "tiktok_privacy_level", "SELF_ONLY").strip() or "SELF_ONLY"
+
     # Build post caption
     caption = title.strip()
     if description.strip() and description.strip() != title.strip():
@@ -1381,7 +1384,7 @@ def upload_to_tiktok(
         caption = caption[:2197] + "..."
 
     if log_callback:
-        log_callback(f"Initializing TikTok Direct Post upload ({file_size / (1024 * 1024):.1f} MB)...")
+        log_callback(f"Initializing TikTok Direct Post upload ({file_size / (1024 * 1024):.1f} MB, Privacy: {privacy_level})...")
 
     init_url = "https://open.tiktokapis.com/v2/post/publish/video/init/"
     headers = {
@@ -1399,13 +1402,28 @@ def upload_to_tiktok(
         "video_cover_timestamp_ms": 1000,
     }
 
+    # Calculate chunk size and chunk count based on TikTok Direct Post API requirements:
+    # 1. If file_size <= 64 MB, upload in 1 chunk with chunk_size = file_size.
+    # 2. If file_size > 64 MB, chunk_size must be between 5 MB and 64 MB.
+    #    TikTok requires: total_chunk_count = math.floor(file_size / chunk_size).
+    #    The final chunk carries the remaining trailing bytes (up to 128 MB).
+    MAX_SINGLE_CHUNK = 64 * 1024 * 1024  # 64 MB
+    CHUNK_UNIT = 20 * 1024 * 1024        # 20 MB
+
+    if file_size <= MAX_SINGLE_CHUNK:
+        chunk_size = file_size
+        total_chunk_count = 1
+    else:
+        chunk_size = CHUNK_UNIT
+        total_chunk_count = max(1, file_size // chunk_size)
+
     payload = {
         "post_info": post_info,
         "source_info": {
             "source": "FILE_UPLOAD",
             "video_size": file_size,
-            "chunk_size": file_size,
-            "total_chunk_count": 1
+            "chunk_size": chunk_size,
+            "total_chunk_count": total_chunk_count
         }
     }
 
@@ -1489,13 +1507,17 @@ def upload_to_tiktok(
                 }
                 stream = ProgressStream(f, file_size, callback=log_callback, label="TikTok")
                 put_res = requests.put(upload_url, headers=upload_headers, data=stream, timeout=300)
-                if put_res.status_code not in (200, 201, 204):
+                if put_res.status_code not in (200, 201, 204, 206, 308):
                     return "", f"TikTok video upload failed (HTTP {put_res.status_code}): {put_res.text}"
             else:
                 uploaded_bytes = 0
                 for i in range(total_chunk_count):
                     start_byte = i * chunk_size
-                    end_byte = min(start_byte + chunk_size, file_size) - 1
+                    if i == total_chunk_count - 1:
+                        end_byte = file_size - 1
+                    else:
+                        end_byte = start_byte + chunk_size - 1
+                    
                     current_chunk_len = end_byte - start_byte + 1
                     chunk_data = f.read(current_chunk_len)
                     
@@ -1505,7 +1527,7 @@ def upload_to_tiktok(
                         "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size}"
                     }
                     put_res = requests.put(upload_url, headers=upload_headers, data=chunk_data, timeout=300)
-                    if put_res.status_code not in (200, 201, 204):
+                    if put_res.status_code not in (200, 201, 204, 206, 308):
                         return "", f"TikTok chunk {i + 1}/{total_chunk_count} upload failed (HTTP {put_res.status_code}): {put_res.text}"
                     
                     uploaded_bytes += current_chunk_len

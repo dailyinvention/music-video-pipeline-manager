@@ -2647,12 +2647,14 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                                 db.update_step(conn, pid, 14, log_text="\n".join(tt_log_lines))
                                 notify(14, "running", txt)
                                 
+                            tt_privacy = db.get_setting(conn, "tiktok_privacy_level", "SELF_ONLY").strip() or "SELF_ONLY"
                             pub_id, err = upload_to_tiktok(
                                 tt_creds.get("access_token", ""),
                                 short_video_path,
                                 title=tt_title,
                                 description=tt_desc,
                                 schedule_time_iso=project.get("tiktok_schedule_time", ""),
+                                privacy_level=tt_privacy,
                                 tags=tags_list,
                                 log_callback=log_cb_tt,
                                 conn=conn
@@ -4192,6 +4194,18 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
         tiktok_redirect_uri_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_redirect_uri", "http://localhost:8989/"))
         ttk.Entry(tt_uri_frame, textvariable=tiktok_redirect_uri_var).pack(side=LEFT, fill=X, expand=True, padx=5)
 
+        tt_priv_frame = ttk.Frame(tab_tiktok)
+        tt_priv_frame.pack(fill=X, pady=5)
+        ttk.Label(tt_priv_frame, text="Privacy Level:", width=18, anchor=W).pack(side=LEFT)
+        tiktok_privacy_level_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_privacy_level", "SELF_ONLY"))
+        tt_priv_combo = ttk.Combobox(
+            tt_priv_frame,
+            textvariable=tiktok_privacy_level_var,
+            values=["SELF_ONLY", "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR"],
+            state="readonly"
+        )
+        tt_priv_combo.pack(side=LEFT, fill=X, expand=True, padx=5)
+
         tt_auth_frame = ttk.Frame(tab_tiktok)
         tt_auth_frame.pack(fill=X, pady=15)
         ttk.Label(tt_auth_frame, text="Authorization Status:", width=18, anchor=W).pack(side=LEFT)
@@ -4363,6 +4377,7 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
             db.set_setting(self.conn, "tiktok_refresh_token", tiktok_refresh_token_var.get().strip())
             db.set_setting(self.conn, "tiktok_open_id", tiktok_open_id_var.get().strip())
             db.set_setting(self.conn, "tiktok_redirect_uri", tiktok_redirect_uri_var.get().strip())
+            db.set_setting(self.conn, "tiktok_privacy_level", tiktok_privacy_level_var.get().strip() or "SELF_ONLY")
             db.set_setting(self.conn, "fb_post_template", fb_tpl_txt.get("1.0", "end-1c").strip())
             db.set_setting(self.conn, "yt_title_template", yt_title_tpl_var.get().strip())
             db.set_setting(self.conn, "yt_desc_template", yt_desc_tpl_txt.get("1.0", "end-1c").strip())
