@@ -19,10 +19,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-# Add parent dir so we can import loop_finder
+# Add parent and engine dir so we can import loop_finder
 _PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _PARENT not in sys.path:
-    sys.path.insert(0, _PARENT)
+_ENGINE = os.path.join(_PARENT, "engine")
+for _p in (_PARENT, _ENGINE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from pipeline import get_binary_path
 

@@ -1,2 +1,5 @@
 **/__pycache__/
 /pipeline_data/
+.DS_Store
+*.csv
+.tmp_*

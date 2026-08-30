@@ -16,7 +16,7 @@ from werkzeug.utils import secure_filename
 from flask import Flask, request, jsonify
 
 # Add project root to sys.path to import the pipeline module
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 

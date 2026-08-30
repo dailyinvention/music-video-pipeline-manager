@@ -478,15 +478,34 @@ def center_crop(frame: np.ndarray, ratio_w: int, ratio_h: int) -> np.ndarray:
         return frame[y_off:y_off + new_h, :]
 
 
+def resolve_watermark_path(watermark_path: str) -> str:
+    """Resolve watermark image path across current dir, assets/, and project root."""
+    if not watermark_path or watermark_path.lower() in ("none", ""):
+        return ""
+    if os.path.exists(watermark_path):
+        return watermark_path
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(root, "assets", watermark_path),
+        os.path.join(root, watermark_path),
+        os.path.join(root, "assets", os.path.basename(watermark_path)),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return watermark_path
+
+
 def load_watermark_data(watermark_path: str, video_w: int, video_h: int, negative: bool = False) -> tuple | None:
     """
     Load a watermark PNG image, calculate coordinates, optionally invert colors,
     and return blending parameters (logo_bgr, logo_alpha, y1, y2, x1, x2).
     """
-    if not watermark_path or watermark_path.lower() in ("none", "") or not os.path.exists(watermark_path):
+    resolved = resolve_watermark_path(watermark_path)
+    if not resolved or not os.path.exists(resolved):
         return None
     try:
-        logo = cv2.imread(watermark_path, cv2.IMREAD_UNCHANGED)
+        logo = cv2.imread(resolved, cv2.IMREAD_UNCHANGED)
         if logo is not None and len(logo.shape) == 3 and logo.shape[2] == 4:
             # Resize logo to fit in bottom right corner (12% of video height)
             w_h = int(video_h * 0.12)
@@ -893,9 +912,10 @@ def process_video(
         
         # Check if watermark exists
         has_watermark = False
-        if watermark and watermark.lower() not in ("none", "") and os.path.exists(watermark):
+        resolved_wm = resolve_watermark_path(watermark)
+        if resolved_wm and resolved_wm.lower() not in ("none", "") and os.path.exists(resolved_wm):
             has_watermark = True
-            cmd += ["-i", watermark]
+            cmd += ["-i", resolved_wm]
             
             watermark_filters = f"scale=-1:{w_h},format=rgba,colorchannelmixer=aa=0.4"
             if negative_logo:

@@ -44,13 +44,18 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
 # Default Paths
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 DEFAULT_INPUT_DIR = "/Volumes/Music To Sleep To"
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/Documents")
 DEFAULT_OUTPUT_FILENAME = "Music_To_Sleep_To_4K_Compilation.mp4"
 DEFAULT_CACHE_DIR_EXTERNAL = os.path.join(DEFAULT_INPUT_DIR, ".stitch_cache")
 DEFAULT_CACHE_DIR_LOCAL = os.path.expanduser("~/Documents/.stitch_cache")
-DEFAULT_WATERMARK = os.path.join(ROOT, "music_to_sleep_to_profile.png")
+DEFAULT_WATERMARK = os.path.join(ROOT, "assets", "music_to_sleep_to_profile.png")
+if not os.path.exists(DEFAULT_WATERMARK):
+    DEFAULT_WATERMARK = os.path.join(ROOT, "music_to_sleep_to_profile.png")
 DB_PATH = os.path.join(ROOT, "pipeline_data", "pipeline.db")
 DEFAULT_FONT = "Baskerville"
 DEFAULT_PRESENTATION_SERIES = "Hypnosonica Presents: Music To Sleep To"

@@ -21,10 +21,12 @@ from pathlib import Path
 from pipeline import db
 from pipeline import get_binary_path
 
-# Root of the music_video project (where the scripts live)
-_SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
+# Root of the music_video project and engine directory
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ENGINE_DIR = os.path.join(_ROOT_DIR, "engine")
+for _p in (_ROOT_DIR, _ENGINE_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 def _run_python_script(script_name: str, args: list[str], log_callback=None) -> tuple[bool, str]:
     """Import and run a script's main() function in-process to work inside PyInstaller bundle."""
@@ -33,7 +35,10 @@ def _run_python_script(script_name: str, args: list[str], log_callback=None) -> 
     from contextlib import redirect_stdout, redirect_stderr
 
     try:
-        module = importlib.import_module(script_name)
+        try:
+            module = importlib.import_module(script_name)
+        except ModuleNotFoundError:
+            module = importlib.import_module(f"engine.{script_name}")
     except Exception as e:
         return False, f"Failed to import {script_name}: {e}"
 

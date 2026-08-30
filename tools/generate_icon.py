@@ -31,9 +31,13 @@ def main():
     # Apply a slight blur for a soft look
     img = cv2.GaussianBlur(img, (5, 5), 0)
     
-    output_path = "app_icon.png"
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    assets_dir = os.path.join(root, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+    output_path = os.path.join(assets_dir, "app_icon.png")
     cv2.imwrite(output_path, img)
     print(f"Icon generated at {output_path}")
 
 if __name__ == "__main__":
+    import os
     main()

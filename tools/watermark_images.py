@@ -15,7 +15,13 @@ import argparse
 import cv2
 import numpy as np
 
-DEFAULT_WATERMARK = "/Users/stefan/Documents/music_video/music_to_sleep_to_profile.png"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+DEFAULT_WATERMARK = os.path.join(ROOT, "assets", "music_to_sleep_to_profile.png")
+if not os.path.exists(DEFAULT_WATERMARK):
+    DEFAULT_WATERMARK = os.path.join(ROOT, "music_to_sleep_to_profile.png")
 
 def load_watermark_data(watermark_path: str, img_w: int, img_h: int, negative: bool = False) -> tuple | None:
     if not watermark_path or watermark_path.lower() in ("none", "") or not os.path.exists(watermark_path):

@@ -9,10 +9,12 @@ Launch the GUI application:
 import os
 import sys
 
-# Ensure the project root is on the path
+# Ensure the project root and engine directory are on the path
 ROOT = os.path.dirname(os.path.abspath(__file__))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+ENGINE = os.path.join(ROOT, "engine")
+for _p in (ROOT, ENGINE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from pipeline.app import PipelineApp
 

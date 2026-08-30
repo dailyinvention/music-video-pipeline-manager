@@ -21,7 +21,10 @@ import sqlite3
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 DB_PATH = os.path.join(ROOT, "pipeline_data", "pipeline.db")
 DEFAULT_CHAPTERS_FILE = os.path.expanduser("~/Documents/Music_To_Sleep_To_4K_Compilation_chapters.txt")
 
