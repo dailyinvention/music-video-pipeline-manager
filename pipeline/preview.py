@@ -37,7 +37,7 @@ PROXY_HEIGHT = 480  # px – height of the preview proxy
 def create_proxy(video_path: str, audio_path: str,
                  output_path: str, height: int = PROXY_HEIGHT) -> bool:
     """
-    Create a small proxy video with the audio merged in.
+    Create a small proxy video (with merged audio if available).
     Returns True on success.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -47,20 +47,33 @@ def create_proxy(video_path: str, audio_path: str,
     else:
         codec_args = ["-c:v", "libx264", "-crf", "28", "-preset", "ultrafast"]
 
-    cmd = [
-        get_binary_path("ffmpeg"), "-y",
-        "-i", video_path,
-        "-i", audio_path,
-        "-filter_complex", "[1:a]apad[aout]",
-        "-map", "0:v:0",
-        "-map", "[aout]",
-    ] + codec_args + [
-        "-vf", f"scale=-2:{height}",
-        "-c:a", "aac", "-b:a", "128k",
-        "-shortest",
-        "-movflags", "+faststart",
-        output_path,
-    ]
+    has_audio = audio_path and os.path.isfile(audio_path)
+
+    if has_audio:
+        cmd = [
+            get_binary_path("ffmpeg"), "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            "-filter_complex", "[1:a]apad[aout]",
+            "-map", "0:v:0",
+            "-map", "[aout]",
+        ] + codec_args + [
+            "-vf", f"scale=-2:{height}",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+    else:
+        cmd = [
+            get_binary_path("ffmpeg"), "-y",
+            "-i", video_path,
+        ] + codec_args + [
+            "-vf", f"scale=-2:{height}",
+            "-an",
+            "-movflags", "+faststart",
+            output_path,
+        ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.returncode == 0
 
@@ -113,8 +126,8 @@ def export_preview_clip(proxy_path: str, candidate: dict,
 
     cmd = [
         get_binary_path("ffmpeg"), "-y",
-        "-ss", str(start), "-to", str(end),
         "-i", proxy_path,
+        "-ss", str(start), "-t", str(end - start),
     ]
     if vf_parts:
         cmd += ["-vf", ",".join(vf_parts)]
@@ -139,6 +152,9 @@ def export_preview_clip(proxy_path: str, candidate: dict,
 def generate_all_previews(video_path: str, audio_path: str,
                           project_folder: str,
                           n_candidates: int = 5,
+                          force: bool = False,
+                          min_duration: float = 10.0,
+                          max_duration: float | None = None,
                           progress_callback=None) -> tuple[str, list[dict]]:
     """
     Full preview pipeline:
@@ -157,7 +173,12 @@ def generate_all_previews(video_path: str, audio_path: str,
     # Step 1: proxy
     if progress_callback:
         progress_callback("Creating preview proxy…", 10)
-    if not os.path.isfile(proxy_path):
+    if force or not os.path.isfile(proxy_path):
+        if os.path.isfile(proxy_path):
+            try:
+                os.remove(proxy_path)
+            except Exception:
+                pass
         ok = create_proxy(video_path, audio_path, proxy_path)
         if not ok:
             raise RuntimeError("Failed to create proxy video")
@@ -165,7 +186,12 @@ def generate_all_previews(video_path: str, audio_path: str,
     # Step 2: analyze
     if progress_callback:
         progress_callback("Analyzing loop points…", 40)
-    candidates = analyze_loops(proxy_path, n_candidates=n_candidates)
+    candidates = analyze_loops(
+        proxy_path,
+        n_candidates=n_candidates,
+        min_duration=min_duration,
+        max_duration=max_duration
+    )
 
     # Step 3: export clips
     total = len(candidates)
@@ -174,7 +200,12 @@ def generate_all_previews(video_path: str, audio_path: str,
         if progress_callback:
             pct = 50 + int(45 * (i / max(total, 1)))
             progress_callback(f"Exporting loop {i + 1}/{total}…", pct)
-        if not os.path.isfile(clip_path):
+        if force or not os.path.isfile(clip_path):
+            if os.path.isfile(clip_path):
+                try:
+                    os.remove(clip_path)
+                except Exception:
+                    pass
             export_preview_clip(proxy_path, c, clip_path, fade=0.0)
         c["preview_path"] = clip_path
 
@@ -183,6 +214,113 @@ def generate_all_previews(video_path: str, audio_path: str,
 
     return proxy_path, candidates
 
+
+def analyze_canvas(proxy_path: str, n_candidates: int = 5, duration: float = 2.5) -> list[dict]:
+    """Find visually appealing 2.5-second chunks using frame differences."""
+    cap = cv2.VideoCapture(proxy_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    
+    frame_diffs = []
+    ret, prev_frame = cap.read()
+    if not ret:
+        return []
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        diff = cv2.absdiff(gray, prev_gray)
+        frame_diffs.append(np.mean(diff))
+        prev_gray = gray
+        
+    cap.release()
+    
+    if not frame_diffs:
+        return []
+        
+    window_size = int(duration * fps)
+    if window_size >= len(frame_diffs):
+        return [{"start_time": 0.0, "end_time": len(frame_diffs)/fps, "duration": len(frame_diffs)/fps, "score": 0.0}]
+        
+    window = np.ones(window_size)
+    scores = np.convolve(frame_diffs, window, mode='valid')
+    
+    video_duration = len(frame_diffs) / fps
+    max_separation = video_duration / (n_candidates + 1)
+    separation_seconds = min(15.0, max(duration, max_separation))
+    separation_frames = int(separation_seconds * fps)
+
+    candidates = []
+    scores_copy = scores.copy()
+    for _ in range(n_candidates):
+        if np.max(scores_copy) <= 0.0:
+            break
+        max_idx = np.argmax(scores_copy)
+        max_score = scores_copy[max_idx]
+        
+        start_time = max_idx / fps
+        candidates.append({
+            "start_time": start_time,
+            "end_time": start_time + duration,
+            "duration": duration,
+            "score": float(max_score)
+        })
+        
+        clear_start = max(0, max_idx - separation_frames)
+        clear_end = min(len(scores_copy), max_idx + separation_frames)
+        scores_copy[clear_start:clear_end] = 0.0
+        
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    return candidates
+
+
+def generate_canvas_previews(video_path: str, audio_path: str,
+                             project_folder: str,
+                             n_candidates: int = 5,
+                             force: bool = False,
+                             progress_callback=None) -> tuple[str, list[dict]]:
+    """Generate Spotify Canvas previews."""
+    preview_dir = os.path.join(project_folder, ".previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    proxy_path = os.path.join(preview_dir, "proxy.mp4")
+
+    if progress_callback:
+        progress_callback("Creating preview proxy…", 10)
+    if force or not os.path.isfile(proxy_path):
+        if os.path.isfile(proxy_path):
+            try:
+                os.remove(proxy_path)
+            except Exception:
+                pass
+        ok = create_proxy(video_path, audio_path, proxy_path)
+        if not ok:
+            raise RuntimeError("Failed to create proxy video")
+
+    if progress_callback:
+        progress_callback("Analyzing canvas chunks…", 40)
+    candidates = analyze_canvas(proxy_path, n_candidates=n_candidates, duration=2.5)
+
+    total = len(candidates)
+    for i, c in enumerate(candidates):
+        clip_path = os.path.join(preview_dir, f"canvas_{i + 1}.mp4")
+        if progress_callback:
+            pct = 50 + int(45 * (i / max(total, 1)))
+            progress_callback(f"Exporting canvas {i + 1}/{total}…", pct)
+        if force or not os.path.isfile(clip_path):
+            if os.path.isfile(clip_path):
+                try:
+                    os.remove(clip_path)
+                except Exception:
+                    pass
+            export_preview_clip(proxy_path, c, clip_path, fade=0.0)
+        c["preview_path"] = clip_path
+
+    if progress_callback:
+        progress_callback("Done", 100)
+
+    return proxy_path, candidates
 
 def extract_thumbnail(video_path: str, time_sec: float,
                       width: int = 320) -> Image.Image | None:

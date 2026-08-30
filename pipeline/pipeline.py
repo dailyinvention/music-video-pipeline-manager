@@ -96,6 +96,8 @@ STEP_NAMES = {
     10: "Upload Facebook Video",
     11: "Upload YouTube Video",
     12: "Upload YouTube Short",
+    13: "Create Spotify Canvas",
+    14: "Upload TikTok Video",
 }
 
 
@@ -137,8 +139,9 @@ class PipelineWorker:
     Background worker that processes queued projects one at a time.
     """
 
-    def __init__(self, conn, on_update=None):
-        self.conn = conn
+    def __init__(self, db_path: str, on_update=None):
+        self.db_path = db_path
+        self.conn = db.get_connection(db_path)
         self.on_update = on_update  # callback(project_id, step, status, msg)
         self._thread: threading.Thread | None = None
         self._running = False
@@ -192,7 +195,7 @@ class PipelineWorker:
         folder = project["folder_path"]
         name = project["name"]
 
-        db.update_project(self.conn, pid, status="processing", current_step=0, total_steps=9)
+        db.update_project(self.conn, pid, status="processing", current_step=0, total_steps=13)
         self._notify(pid, 0, "started", f"Processing: {name}")
 
         try:
@@ -227,8 +230,11 @@ class PipelineWorker:
             # --- Step 9: Text Overlay ---
             self._run_step(pid, 9, folder, project)
 
-            db.update_project(self.conn, pid, status="pending_deployment", current_step=9)
-            self._notify(pid, 9, "done", f"Complete: {name} (Pending Deployment)")
+            # --- Step 13: Spotify Canvas ---
+            self._run_step(pid, 13, folder, project)
+
+            db.update_project(self.conn, pid, status="pending_deployment", current_step=13)
+            self._notify(pid, 13, "done", f"Complete: {name} (Pending Deployment)")
 
         except PipelineError as e:
             db.update_project(
@@ -240,6 +246,8 @@ class PipelineWorker:
 
     def _run_step(self, pid: int, step: int, folder: str, project: dict):
         step_name = STEP_NAMES[step]
+        # Reload fresh copy of project to ensure dynamic settings (like loop_pick or spotify_canvas_pick) are correct
+        project = db.get_project(self.conn, pid) or project
         db.update_project(self.conn, pid, current_step=step)
         db.update_step(
             self.conn, pid, step,
@@ -279,6 +287,8 @@ class PipelineWorker:
                 output_file, log_text = self._step_crop(folder, project, log_cb)
             elif step == 9:
                 output_file, log_text = self._step_text(folder, project, log_cb)
+            elif step == 13:
+                output_file, log_text = self._step_spotify_canvas(folder, project, log_cb)
 
             db.update_step(
                 self.conn, pid, step,
@@ -456,20 +466,29 @@ class PipelineWorker:
         return loop_file, log
 
     def _step_crop(self, folder: str, project: dict, log_callback=None) -> tuple[str, str]:
-        """Step 8: Crop Loop Video to 9:16 aspect ratio."""
+        """Step 8: Crop to 9:16. Source is FB video when short_source_fb=1, otherwise the loop video."""
         if project.get("skip_shorts", 0):
             return "Skipped", "Bypassed crop (Shorts disabled)"
 
         name = project["name"]
-        loop_file = os.path.join(folder, f"{name} 4k (Video) Loop.mp4")
         cropped = os.path.join(folder, f"{name} 4k (Video) Loop Crop.mp4")
 
-        if not os.path.isfile(loop_file):
-            raise RuntimeError(f"Loop video not found: {loop_file}")
+        if project.get("short_source_fb", 0):
+            source = os.path.join(folder, f"{name} 4k - Facebook.mp4")
+            if not os.path.isfile(source):
+                source = os.path.join(folder, f"{name} - Facebook.mp4")
+            if not os.path.isfile(source):
+                source = project.get("facebook_video") or ""
+            if not source or not os.path.isfile(source):
+                raise RuntimeError("Facebook video source not found for Short crop")
+        else:
+            source = os.path.join(folder, f"{name} 4k (Video) Loop.mp4")
+            if not os.path.isfile(source):
+                raise RuntimeError(f"Loop video not found: {source}")
 
         args = [
             "--crop", "9:16",
-            "-i", loop_file,
+            "-i", source,
             "-o", cropped,
         ]
         if project.get("negative_logo", 0):
@@ -512,6 +531,110 @@ class PipelineWorker:
         if not ok:
             raise RuntimeError(f"Text overlay failed: {log}")
         return output, log
+
+    def _step_spotify_canvas(self, folder: str, project: dict, log_callback=None) -> tuple[str, str]:
+        """Step 13: Create Spotify Canvas (5s, 9:16)."""
+        if not project.get("generate_spotify_canvas", 0):
+            return "Skipped", "Bypassed Spotify Canvas (generate_spotify_canvas disabled)"
+
+        name = project["name"]
+        source = os.path.join(folder, f"{name} 4k (Video).mp4")
+        if not os.path.isfile(source):
+            source = os.path.join(folder, f"{name} (Video).mp4")
+        if not os.path.isfile(source):
+            source = project.get("youtube_video") or ""
+        if not os.path.isfile(source):
+            source = project.get("video_file") or ""
+            
+        if not source or not os.path.isfile(source):
+            raise RuntimeError(f"Source YouTube video not found for Spotify Canvas.")
+
+        import json
+        candidates_json = project.get("spotify_candidates_json", "[]")
+        try:
+            candidates = json.loads(candidates_json)
+        except:
+            candidates = []
+
+        if not candidates:
+            raise RuntimeError("No Spotify Canvas candidates found in project.")
+
+        pick = project.get("spotify_canvas_pick", 1)
+        if pick < 1 or pick > len(candidates):
+            candidate = candidates[0]
+        else:
+            candidate = candidates[pick - 1]
+
+        start = candidate["start_time"]
+        end = candidate["end_time"]
+
+        temp_segment = os.path.join(folder, "temp_canvas_segment.mp4")
+        
+        # We need to re-encode the segment slightly because copying without keyframes might result in inaccurate cuts.
+        # But for speed, let's just do a high quality fast re-encode for the 5s segment.
+        import sys
+        if sys.platform == "darwin":
+            codec_args = ["-c:v", "h264_videotoolbox", "-q:v", "55"]
+        else:
+            codec_args = ["-c:v", "libx264", "-crf", "18", "-preset", "ultrafast"]
+            
+        cmd_extract = [
+            get_binary_path("ffmpeg"), "-y",
+            "-i", source,
+            "-ss", str(start), "-t", str(end - start),
+        ] + codec_args + [
+            "-c:a", "copy",
+            temp_segment
+        ]
+        ok, log = _run(cmd_extract, "Extract Spotify Canvas segment", log_callback)
+        if not ok:
+            raise RuntimeError(f"Spotify Canvas extract failed: {log}")
+
+        temp_cropped = os.path.join(folder, "temp_canvas_cropped.mp4")
+        args = [
+            "--crop", "9:16",
+            "--watermark", "none",
+            "-i", temp_segment,
+            "-o", temp_cropped,
+        ]
+        ok, log = _run_python_script("video_mod", args, log_callback)
+        if not ok:
+            if os.path.isfile(temp_segment):
+                try: os.remove(temp_segment)
+                except Exception: pass
+            raise RuntimeError(f"Spotify Canvas crop failed: {log}")
+
+        output_canvas = os.path.join(folder, f"{name} - Spotify Canvas.mp4")
+        
+        # Scale to exactly 1080x1920 using ffmpeg
+        import sys
+        if sys.platform == "darwin":
+            scale_codec = ["-c:v", "h264_videotoolbox", "-q:v", "55"]
+        else:
+            scale_codec = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
+            
+        cmd_scale = [
+            get_binary_path("ffmpeg"), "-y",
+            "-i", temp_cropped,
+            "-filter_complex", "[0:v]scale=1080:1920,split[v1][v2];[v1]setpts=PTS-STARTPTS[v1_pts];[v2]reverse,setpts=PTS-STARTPTS[v2_rev];[v1_pts][v2_rev]concat=n=2:v=1:a=0[vout]",
+            "-map", "[vout]",
+        ] + scale_codec + [
+            "-an",
+            output_canvas
+        ]
+        
+        ok_scale, log_scale = _run(cmd_scale, "Scale Spotify Canvas to 1080x1920", log_callback)
+        
+        for f in [temp_segment, temp_cropped]:
+            if os.path.isfile(f):
+                try: os.remove(f)
+                except Exception: pass
+
+        if not ok_scale:
+            raise RuntimeError(f"Spotify Canvas scaling failed: {log_scale}")
+
+        return output_canvas, log_scale
+
 
 
 class PipelineError(Exception):

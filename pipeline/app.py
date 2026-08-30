@@ -23,6 +23,13 @@ from pipeline.pipeline import PipelineWorker, STEP_NAMES
 from pipeline.preview import (
     generate_all_previews, VideoPlayer, extract_thumbnail,
 )
+from pipeline.frame_extractor import (
+    analyze_interesting_frames,
+    extract_thumbnail_image,
+    export_frame,
+    batch_export_frames,
+    extract_full_frame,
+)
 
 from PIL import Image, ImageTk
 
@@ -70,13 +77,17 @@ class PipelineApp(ttk.Window):
         self.conn = db.init_db(DB_PATH)
 
         # Subsystems
-        self.watcher = FolderWatcher(self.conn, on_new_project=self._on_new_project)
-        self.worker = PipelineWorker(self.conn, on_update=self._on_pipeline_update)
+        self.watcher = FolderWatcher(DB_PATH, on_new_project=self._on_new_project)
+        self.worker = PipelineWorker(DB_PATH, on_update=self._on_pipeline_update)
 
         # State
         self.selected_project_id: int | None = None
         self._player: VideoPlayer | None = None
         self._loop_thumbnails: dict[int, ImageTk.PhotoImage] = {}
+        self._interesting_img_thumbnails: dict[str, ImageTk.PhotoImage] = {}
+        self._current_interesting_candidates: list[dict] = []
+        self._interesting_cand_vars: dict[int, tk.BooleanVar] = {}
+        self._re_render_all_templates_callback = None
 
         self._build_ui()
         self._start_services()
@@ -105,6 +116,11 @@ class PipelineApp(ttk.Window):
         ttk.Button(
             top, text="⚙ Settings", bootstyle="secondary-outline",
             command=self._show_settings,
+        ).pack(side=RIGHT, padx=5)
+
+        ttk.Button(
+            top, text="🖼️ Extract Images", bootstyle="info-outline",
+            command=self._open_standalone_frame_extractor,
         ).pack(side=RIGHT, padx=5)
 
         self._pause_btn = ttk.Button(
@@ -204,6 +220,7 @@ class PipelineApp(ttk.Window):
             except Exception:
                 pass
         self._detail_content = None
+        self._re_render_all_templates_callback = None
 
     def _show_empty_detail(self):
         self._clear_detail()
@@ -242,12 +259,17 @@ class PipelineApp(ttk.Window):
             os.path.isfile(short_video_path) or
             project.get("short_upload_status") == "done"
         )
+        need_tiktok = (
+            bool(project.get("process_tiktok") if project.get("process_tiktok") is not None else 0) or
+            project.get("tiktok_upload_status") == "done"
+        )
         
         fb_ok = not need_fb or (project.get("fb_upload_status") == "done")
         yt_ok = not need_yt or (project.get("yt_upload_status") == "done")
         short_ok = not need_short or (project.get("short_upload_status") == "done")
+        tiktok_ok = not need_tiktok or (project.get("tiktok_upload_status") == "done")
         
-        if fb_ok and yt_ok and short_ok:
+        if fb_ok and yt_ok and short_ok and tiktok_ok:
             db.update_project(self.conn, pid, status="done", error_message="")
         else:
             if project.get("status") == "done":
@@ -306,11 +328,14 @@ class PipelineApp(ttk.Window):
 
         # Error / last-run message (show on any status if present)
         if project.get("error_message"):
+            err_msg = project["error_message"]
+            if len(err_msg) > 1000:
+                err_msg = err_msg[:1000] + "\n... (truncated, see full log below)"
             err_frame = ttk.Frame(f)
             err_frame.pack(fill=X, pady=(0, 10))
             ttk.Label(
                 err_frame,
-                text=f"Last error: {project['error_message']}",
+                text=f"Last error: {err_msg}",
                 bootstyle="danger",
                 wraplength=700,
             ).pack(fill=X)
@@ -324,13 +349,13 @@ class PipelineApp(ttk.Window):
         # Status-specific panels packed at the top
         if status == "pending_link":
             self._show_pending_link_panel(f, project)
-        elif status == "processing":
+        elif status in ("processing", "deploying"):
             self._show_processing_progress_panel(f, project)
         elif status == "done":
             self._show_done_summary_panel(f, project)
 
-        # ---- Editable fields (staged / queued / error / pending_deployment) ----
-        is_editable = status in ("staged", "error", "queued", "pending_deployment")
+        # ---- Editable fields (staged / queued / error / pending_deployment / done) ----
+        is_editable = status in ("staged", "error", "queued", "pending_deployment", "done")
 
         # Folder path
         ttk.Label(
@@ -351,7 +376,12 @@ class PipelineApp(ttk.Window):
         tab_shorts = ttk.Frame(notebook, padding=10)
         notebook.add(tab_shorts, text="📱 Shorts Overlay")
 
-        # Tab 3: Publishing & Scheduling
+        # Tab 3: Interesting Images
+        tab_images = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_images, text="🖼️ Interesting Images")
+        self._tab_images = tab_images
+
+        # Tab 4: Publishing & Scheduling
         tab_pub = ttk.Frame(notebook, padding=10)
         notebook.add(tab_pub, text="🚀 Publishing & Scheduling")
         self._tab_pub = tab_pub
@@ -471,7 +501,37 @@ class PipelineApp(ttk.Window):
             state="normal" if is_editable else "disabled",
             bootstyle="success-square-toggle"
         )
-        self._neg_logo_chk.pack(side=LEFT)
+        self._neg_logo_chk.pack(side=LEFT, padx=(0, 15))
+
+        self._short_src_fb_var = tk.BooleanVar(value=bool(project.get("short_source_fb", 1)))
+        self._short_src_fb_chk = ttk.Checkbutton(
+            settings_frame, text="Use FB Video for Short",
+            variable=self._short_src_fb_var,
+            state="normal" if is_editable else "disabled",
+            bootstyle="warning-square-toggle"
+        )
+        self._short_src_fb_chk.pack(side=LEFT, padx=(0, 15))
+
+        settings_frame_2 = ttk.Frame(tab_files)
+        settings_frame_2.pack(fill=X, pady=(0, 10))
+
+        self._proc_tiktok_var = tk.BooleanVar(value=bool(project.get("process_tiktok") if project.get("process_tiktok") is not None else 0))
+        self._proc_tiktok_chk = ttk.Checkbutton(
+            settings_frame_2, text="Process TikTok Short",
+            variable=self._proc_tiktok_var,
+            state="normal" if is_editable else "disabled",
+            bootstyle="success-square-toggle"
+        )
+        self._proc_tiktok_chk.pack(side=LEFT, padx=(0, 15))
+
+        self._proc_canvas_var = tk.BooleanVar(value=bool(project.get("generate_spotify_canvas", 0)))
+        self._proc_canvas_chk = ttk.Checkbutton(
+            settings_frame_2, text="Process Spotify Canvas",
+            variable=self._proc_canvas_var,
+            state="normal" if is_editable else "disabled",
+            bootstyle="success-square-toggle"
+        )
+        self._proc_canvas_chk.pack(side=LEFT)
 
         # Separator
         ttk.Separator(tab_files).pack(fill=X, pady=10)
@@ -513,6 +573,26 @@ class PipelineApp(ttk.Window):
         )
         self._loop_pick_spin.pack(side=LEFT, padx=5)
 
+        # Loop limits (min/max duration)
+        loop_limits = ttk.Frame(tab_files)
+        loop_limits.pack(fill=X, pady=5)
+
+        ttk.Label(loop_limits, text="Min Dur (s):").pack(side=LEFT)
+        self._loop_min_dur_var = tk.DoubleVar(value=project.get("loop_min_dur", 10.0))
+        ttk.Spinbox(
+            loop_limits, from_=1.0, to=300.0, increment=5.0,
+            textvariable=self._loop_min_dur_var, width=5,
+            state="normal" if is_editable else "readonly",
+        ).pack(side=LEFT, padx=(5, 20))
+
+        ttk.Label(loop_limits, text="Max Dur (s) (0=all):").pack(side=LEFT)
+        self._loop_max_dur_var = tk.DoubleVar(value=project.get("loop_max_dur", 0.0))
+        ttk.Spinbox(
+            loop_limits, from_=0.0, to=600.0, increment=10.0,
+            textvariable=self._loop_max_dur_var, width=5,
+            state="normal" if is_editable else "readonly",
+        ).pack(side=LEFT, padx=(5, 20))
+
         # Loop candidates frame
         self._candidates_frame = ttk.Frame(tab_files)
         self._candidates_frame.pack(fill=X, pady=5)
@@ -524,6 +604,43 @@ class PipelineApp(ttk.Window):
         if candidates:
             self._show_candidates(candidates, is_editable)
 
+        # Spotify Canvas Section Header
+        ttk.Separator(tab_files).pack(fill=X, pady=10)
+        canvas_header = ttk.Frame(tab_files)
+        canvas_header.pack(fill=X, pady=(0, 5))
+        ttk.Label(
+            canvas_header, text="Spotify Canvas Selection",
+            font=("Helvetica", 11, "bold"),
+        ).pack(side=LEFT)
+
+        if is_editable:
+            self._analyze_canvas_btn = ttk.Button(
+                canvas_header, text="▶ Analyze Canvas",
+                bootstyle="info",
+                command=lambda: self._analyze_canvas(pid),
+            )
+            self._analyze_canvas_btn.pack(side=RIGHT)
+
+        canvas_params = ttk.Frame(tab_files)
+        canvas_params.pack(fill=X, pady=5)
+        ttk.Label(canvas_params, text="Selected Canvas:").pack(side=LEFT)
+        self._canvas_pick_var = tk.IntVar(value=project.get("spotify_canvas_pick", 1))
+        self._canvas_pick_spin = ttk.Spinbox(
+            canvas_params, from_=1, to=10,
+            textvariable=self._canvas_pick_var, width=4,
+            state="normal" if is_editable else "disabled",
+        )
+        self._canvas_pick_spin.pack(side=LEFT, padx=5)
+
+        self._canvas_candidates_frame = ttk.Frame(tab_files)
+        self._canvas_candidates_frame.pack(fill=X, pady=5)
+        canvas_cands_json = project.get("spotify_candidates_json", "[]")
+        try:
+            canvas_cands = json.loads(canvas_cands_json)
+        except (json.JSONDecodeError, TypeError):
+            canvas_cands = []
+        if canvas_cands:
+            self._show_canvas_candidates(canvas_cands, is_editable)
 
         # ------------------ TAB 2: SHORTS TEXT OVERLAY ------------------
         ttk.Label(
@@ -584,7 +701,10 @@ class PipelineApp(ttk.Window):
         ).pack(side=LEFT, padx=2)
 
 
-        # ------------------ TAB 3: PUBLISHING & SCHEDULING ------------------
+        # ------------------ TAB 3: INTERESTING IMAGES ------------------
+        self._build_interesting_images_tab(tab_images, project)
+
+        # ------------------ TAB 4: PUBLISHING & SCHEDULING ------------------
         # 0. Video Player Preview Frame
         player_frame = ttk.LabelFrame(tab_pub, text="Embedded Video Player Preview")
         player_frame.pack(fill=X, pady=(0, 10))
@@ -638,31 +758,53 @@ class PipelineApp(ttk.Window):
         from pipeline.upload import render_template
         
         desc_body = project.get("description_body", "") or project.get("overlay_text", "")
+        overlay_val = project.get("overlay_text", "")
+        
+        main_yt_id = ""
+        for s in db.get_steps(self.conn, pid):
+            if s["step_num"] == 11 and s.get("output_file") and not s["output_file"].startswith("Bypassed"):
+                main_yt_id = s["output_file"]
+                break
+        yt_url_val = f"https://www.youtube.com/watch?v={main_yt_id}" if main_yt_id else ""
         
         fb_body_val = project.get("fb_post_body", "") or ""
         if not fb_body_val:
             fb_template = db.get_setting(self.conn, "fb_post_template", "{{title}}\n\n{{body}}")
-            fb_body_val = render_template(fb_template, desc_body, project.get("name", ""))
+            fb_body_val = render_template(fb_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
             
         yt_title_val = project.get("yt_title_body", "") or ""
         if not yt_title_val:
             yt_title_template = db.get_setting(self.conn, "yt_title_template", "{{title}}")
-            yt_title_val = render_template(yt_title_template, desc_body, project.get("name", ""))
+            yt_title_val = render_template(yt_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
             
         yt_desc_val = project.get("yt_description_body", "") or ""
         if not yt_desc_val:
             yt_desc_template = db.get_setting(self.conn, "yt_desc_template", "{{body}}")
-            yt_desc_val = render_template(yt_desc_template, desc_body, project.get("name", ""))
+            yt_desc_val = render_template(yt_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
             
         short_title_val = project.get("short_title_body", "") or ""
         if not short_title_val:
             short_title_template = db.get_setting(self.conn, "short_title_template", "{{title}} #shorts")
-            short_title_val = render_template(short_title_template, desc_body, project.get("name", ""))
+            short_title_val = render_template(short_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
             
         short_desc_val = project.get("short_description_body", "") or ""
         if not short_desc_val:
-            short_desc_template = db.get_setting(self.conn, "short_desc_template", "{{body}} #shorts")
-            short_desc_val = render_template(short_desc_template, desc_body, project.get("name", ""))
+            short_desc_template = db.get_setting(self.conn, "short_desc_template", "Relaxing music to sooth the soul and help guide you to sleep.\n\nChannel:  @music_to_sleep_to  \nVisit here to view the full-length 4k Youtube video: {{youtube-url}}\n\n© {{year}} Music To Sleep To. All Rights Reserved.\nMade with the help of Suno.")
+            short_desc_val = render_template(short_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+
+        tiktok_title_val = project.get("tiktok_title_body", "") or ""
+        if not tiktok_title_val:
+            tiktok_title_template = db.get_setting(self.conn, "tiktok_title_template", "{{title}} #shorts #fyp #foryou")
+            tiktok_title_val = render_template(tiktok_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+
+        tiktok_desc_val = project.get("tiktok_description_body", "") or ""
+        if not tiktok_desc_val:
+            tiktok_desc_template = db.get_setting(self.conn, "tiktok_desc_template", "{{body}}\n\n#music #sleep #relaxing #fyp #foryou")
+            tiktok_desc_val = render_template(tiktok_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+
+        tags_val = project.get("tags", "") or ""
+        if not tags_val:
+            tags_val = db.get_setting(self.conn, "default_tags", "")
             
         # 1. Raw Description / Quote Body Section
         desc_lf = ttk.LabelFrame(tab_pub, text="Description / Quote Body ({{body}})")
@@ -683,13 +825,25 @@ class PipelineApp(ttk.Window):
             yt_title_template = db.get_setting(self.conn, "yt_title_template", "{{title}}")
             yt_desc_template = db.get_setting(self.conn, "yt_desc_template", "{{body}}")
             short_title_template = db.get_setting(self.conn, "short_title_template", "{{title}} #shorts")
-            short_desc_template = db.get_setting(self.conn, "short_desc_template", "{{body}} #shorts")
+            short_desc_template = db.get_setting(self.conn, "short_desc_template", "Relaxing music to sooth the soul and help guide you to sleep.\n\nChannel:  @music_to_sleep_to  \nVisit here to view the full-length 4k Youtube video: {{youtube-url}}\n\n© {{year}} Music To Sleep To. All Rights Reserved.\nMade with the help of Suno.")
+            tiktok_title_template = db.get_setting(self.conn, "tiktok_title_template", "{{title}} #shorts #fyp #foryou")
+            tiktok_desc_template = db.get_setting(self.conn, "tiktok_desc_template", "{{body}}\n\n#music #sleep #relaxing #fyp #foryou")
             
-            fb_v = render_template(fb_template, current_desc, name)
-            yt_t = render_template(yt_title_template, current_desc, name)
-            yt_d = render_template(yt_desc_template, current_desc, name)
-            st_t = render_template(short_title_template, current_desc, name)
-            st_d = render_template(short_desc_template, current_desc, name)
+            current_yt_id = ""
+            for s in db.get_steps(self.conn, pid):
+                if s["step_num"] == 11 and s.get("output_file") and not s["output_file"].startswith("Bypassed"):
+                    current_yt_id = s["output_file"]
+                    break
+            current_yt_url = f"https://www.youtube.com/watch?v={current_yt_id}" if current_yt_id else ""
+            current_overlay = project.get("overlay_text", "")
+
+            fb_v = render_template(fb_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
+            yt_t = render_template(yt_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
+            yt_d = render_template(yt_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
+            st_t = render_template(short_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
+            st_d = render_template(short_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
+            tt_t = render_template(tiktok_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
+            tt_d = render_template(tiktok_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
             
             self._fb_post_body_text.configure(state="normal")
             self._fb_post_body_text.delete("1.0", tk.END)
@@ -712,21 +866,63 @@ class PipelineApp(ttk.Window):
             self._short_desc_body_text.insert("1.0", st_d)
             if not is_editable:
                 self._short_desc_body_text.configure(state="disabled")
+
+            if hasattr(self, "_tiktok_title_body_var") and self._tiktok_title_body_var:
+                self._tiktok_title_body_var.set(tt_t)
+            if hasattr(self, "_tiktok_desc_body_text") and self._tiktok_desc_body_text:
+                self._tiktok_desc_body_text.configure(state="normal")
+                self._tiktok_desc_body_text.delete("1.0", tk.END)
+                self._tiktok_desc_body_text.insert("1.0", tt_d)
+                if not is_editable:
+                    self._tiktok_desc_body_text.configure(state="disabled")
                 
             if show_info:
                 messagebox.showinfo("Success", "Templates successfully re-applied using current quote body!")
                 
+        self._re_render_all_templates_callback = re_render_all_templates
+        
         if is_editable:
             # Bind key release and paste events for fully automatic real-time updates
             self._description_body_text.bind("<KeyRelease>", lambda event: re_render_all_templates(show_info=False))
             self._description_body_text.bind("<<Paste>>", lambda event: self.after(10, lambda: re_render_all_templates(show_info=False)))
             
+            btn_frame = ttk.Frame(desc_pad)
+            btn_frame.pack(fill=X, pady=5)
+            
+            self._gemini_quote_btn = ttk.Button(
+                btn_frame, text="✨ Gemini Quote",
+                bootstyle="primary",
+                command=lambda: self._generate_gemini_quote(pid),
+            )
+            self._gemini_quote_btn.pack(side=LEFT, padx=(0, 5))
+            
             re_render_btn = ttk.Button(
-                desc_pad, text="🔄 Reset Templates",
+                btn_frame, text="🔄 Reset Templates",
                 bootstyle="secondary-outline",
                 command=lambda: re_render_all_templates(show_info=True),
             )
-            re_render_btn.pack(anchor=E, pady=5)
+            re_render_btn.pack(side=RIGHT)
+            
+        # Tags Section
+        tags_lf = ttk.LabelFrame(tab_pub, text="Tags (comma-separated)")
+        tags_lf.pack(fill=X, pady=5)
+        tags_pad = ttk.Frame(tags_lf, padding=10)
+        tags_pad.pack(fill=X)
+        
+        self._tags_entry_var = tk.StringVar(value=tags_val)
+        tags_entry = ttk.Entry(
+            tags_pad, textvariable=self._tags_entry_var,
+            state="normal" if is_editable else "readonly"
+        )
+        tags_entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 10))
+        
+        if is_editable:
+            self._gemini_tags_btn = ttk.Button(
+                tags_pad, text="✨ Gemini Tags",
+                bootstyle="primary-outline",
+                command=lambda: self._generate_gemini_tags(pid)
+            )
+            self._gemini_tags_btn.pack(side=RIGHT)
             
         # 2. Facebook Section
         fb_lf = ttk.LabelFrame(tab_pub, text="Facebook Post Details")
@@ -788,10 +984,37 @@ class PipelineApp(ttk.Window):
                 self._fb_date_entry.entry.delete(0, tk.END)
             except Exception:
                 pass
-        self._fb_time_var = tk.StringVar(value=fb_time_only or "12:00")
+        self._fb_time_var = tk.StringVar(value=fb_time_only or "21:00")
         self._fb_time_entry = ttk.Entry(fb_sched_frame, textvariable=self._fb_time_var, width=6, state="normal" if is_editable else "readonly")
         self._fb_time_entry.pack(side=LEFT)
         ttk.Label(fb_sched_frame, text=" (HH:MM - Local Time)", bootstyle="secondary").pack(side=LEFT, padx=3)
+
+        def _autofill_fb_date():
+            from pipeline.upload import get_last_facebook_scheduled_date
+            import datetime as dt_mod
+            fb_page_id = db.get_setting(self.conn, "fb_page_id", "").strip()
+            fb_token = db.get_setting(self.conn, "fb_page_token", "").strip()
+            if not fb_token:
+                fb_token = db.get_setting(self.conn, "fb_long_user_token", "").strip()
+            if not fb_page_id or not fb_token:
+                messagebox.showerror("Missing Credentials", "Facebook Page ID and Page Access Token are required in Settings.")
+                return
+            last_dt, err = get_last_facebook_scheduled_date(fb_page_id, fb_token)
+            if err or not last_dt:
+                messagebox.showerror("Could Not Fetch", f"Could not retrieve scheduled videos from Facebook:\n{err}")
+                return
+            next_dt = last_dt + dt_mod.timedelta(days=1)
+            try:
+                self._fb_date_entry.entry.delete(0, tk.END)
+                self._fb_date_entry.entry.insert(0, next_dt.strftime("%Y-%m-%d"))
+            except Exception:
+                pass
+
+        ttk.Button(
+            fb_sched_frame, text="📅 Auto-fill from FB",
+            bootstyle="info-outline",
+            command=_autofill_fb_date,
+        ).pack(side=LEFT, padx=(10, 0))
 
         # 3. YouTube Long Section
         yt_lf = ttk.LabelFrame(tab_pub, text="YouTube Video Details")
@@ -860,10 +1083,56 @@ class PipelineApp(ttk.Window):
                 self._yt_date_entry.entry.delete(0, tk.END)
             except Exception:
                 pass
-        self._yt_time_var = tk.StringVar(value=yt_time_only or "12:00")
+        self._yt_time_var = tk.StringVar(value=yt_time_only or "21:00")
         self._yt_time_entry = ttk.Entry(yt_sched_frame, textvariable=self._yt_time_var, width=6, state="normal" if is_editable else "readonly")
         self._yt_time_entry.pack(side=LEFT)
         ttk.Label(yt_sched_frame, text=" (HH:MM - Local Time)", bootstyle="secondary").pack(side=LEFT, padx=3)
+
+        def _autofill_yt_long_date():
+            import datetime as dt_mod
+            from pipeline.upload import get_youtube_client, get_last_youtube_scheduled_dates
+            creds, err = get_youtube_client(self.conn)
+            if not creds:
+                messagebox.showerror("YouTube Not Authorized", err)
+                return
+            last_long, _, err = get_last_youtube_scheduled_dates(creds)
+            if err:
+                messagebox.showerror("Could Not Fetch", f"Could not retrieve YouTube scheduled videos:\n{err}")
+                return
+            if not last_long:
+                messagebox.showinfo("No Videos Found", "No scheduled or published YouTube long videos found.")
+                return
+            weekday = last_long.weekday()  # 0=Mon … 6=Sun
+            if weekday == 1:    # Tuesday → Friday same week
+                next_dt = last_long + dt_mod.timedelta(days=3)
+            elif weekday == 4:  # Friday → Tuesday next week
+                next_dt = last_long + dt_mod.timedelta(days=4)
+            else:
+                day_name = last_long.strftime("%A")
+                messagebox.showwarning("Unexpected Day", f"Last long video is on a {day_name}. Expected Tuesday or Friday.")
+                return
+
+            # Advance to the future along the Tuesday-Friday schedule if in the past
+            while next_dt.date() < dt_mod.date.today():
+                wd = next_dt.weekday()
+                if wd == 1:    # Tuesday -> Friday
+                    next_dt += dt_mod.timedelta(days=3)
+                elif wd == 4:  # Friday -> Tuesday
+                    next_dt += dt_mod.timedelta(days=4)
+                else:
+                    next_dt += dt_mod.timedelta(days=1)
+
+            try:
+                self._yt_date_entry.entry.delete(0, tk.END)
+                self._yt_date_entry.entry.insert(0, next_dt.strftime("%Y-%m-%d"))
+            except Exception:
+                pass
+
+        ttk.Button(
+            yt_sched_frame, text="📅 Auto-fill from YT",
+            bootstyle="info-outline",
+            command=_autofill_yt_long_date,
+        ).pack(side=LEFT, padx=(10, 0))
 
         # 4. YouTube Short Section
         short_lf = ttk.LabelFrame(tab_pub, text="YouTube Short Details")
@@ -932,13 +1201,132 @@ class PipelineApp(ttk.Window):
                 self._short_date_entry.entry.delete(0, tk.END)
             except Exception:
                 pass
-        self._short_time_var = tk.StringVar(value=short_time_only or "12:00")
+        self._short_time_var = tk.StringVar(value=short_time_only or "21:00")
         self._short_time_entry = ttk.Entry(short_sched_frame, textvariable=self._short_time_var, width=6, state="normal" if is_editable else "readonly")
         self._short_time_entry.pack(side=LEFT)
         ttk.Label(short_sched_frame, text=" (HH:MM - Local Time)", bootstyle="secondary").pack(side=LEFT, padx=3)
-        
+
+        def _autofill_yt_short_date():
+            import datetime as dt_mod
+            from pipeline.upload import get_youtube_client, get_last_youtube_scheduled_dates
+            creds, err = get_youtube_client(self.conn)
+            if not creds:
+                messagebox.showerror("YouTube Not Authorized", err)
+                return
+            _, last_short, err = get_last_youtube_scheduled_dates(creds)
+            if err:
+                messagebox.showerror("Could Not Fetch", f"Could not retrieve YouTube scheduled videos:\n{err}")
+                return
+            if not last_short:
+                messagebox.showinfo("No Videos Found", "No scheduled or published YouTube Shorts found.")
+                return
+            weekday = last_short.weekday()  # 0=Mon … 6=Sun
+            if weekday == 0:    # Monday → Thursday same week
+                next_dt = last_short + dt_mod.timedelta(days=3)
+            elif weekday == 3:  # Thursday → Monday next week
+                next_dt = last_short + dt_mod.timedelta(days=4)
+            else:
+                day_name = last_short.strftime("%A")
+                messagebox.showwarning("Unexpected Day", f"Last Short is on a {day_name}. Expected Monday or Thursday.")
+                return
+
+            # Advance to the future along the Monday-Thursday schedule if in the past
+            while next_dt.date() < dt_mod.date.today():
+                wd = next_dt.weekday()
+                if wd == 0:    # Monday -> Thursday
+                    next_dt += dt_mod.timedelta(days=3)
+                elif wd == 3:  # Thursday -> Monday
+                    next_dt += dt_mod.timedelta(days=4)
+                else:
+                    next_dt += dt_mod.timedelta(days=1)
+
+            try:
+                self._short_date_entry.entry.delete(0, tk.END)
+                self._short_date_entry.entry.insert(0, next_dt.strftime("%Y-%m-%d"))
+            except Exception:
+                pass
+
+        ttk.Button(
+            short_sched_frame, text="📅 Auto-fill from YT",
+            bootstyle="info-outline",
+            command=_autofill_yt_short_date,
+        ).pack(side=LEFT, padx=(10, 0))
+
         short_status = project.get("short_upload_status", "pending")
         short_status_color = "info" if short_status == "pending" else "success" if short_status == "done" else "danger"
+
+        # 5. TikTok Short Section
+        tiktok_lf = ttk.LabelFrame(tab_pub, text="TikTok Video Details")
+        tiktok_lf.pack(fill=X, pady=5)
+        tiktok_pad = ttk.Frame(tiktok_lf, padding=10)
+        tiktok_pad.pack(fill=X)
+        
+        # Row with Checkbox, Status, and Toggle Button
+        tiktok_ctrl_frame = ttk.Frame(tiktok_pad)
+        tiktok_ctrl_frame.pack(fill=X, pady=(0, 10))
+        
+        self._deploy_tiktok_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tiktok_ctrl_frame, text="Deploy TikTok Short", variable=self._deploy_tiktok_var, state="normal" if is_editable else "disabled").pack(side=LEFT)
+        
+        tiktok_status = project.get("tiktok_upload_status", "pending")
+        tiktok_status_color = "info" if tiktok_status == "pending" else "success" if tiktok_status == "done" else "danger"
+        ttk.Label(tiktok_ctrl_frame, text=f" [{tiktok_status.upper()}] ", bootstyle=f"inverse-{tiktok_status_color}").pack(side=LEFT, padx=10)
+        
+        def toggle_tiktok_status():
+            new_status = "pending" if tiktok_status == "done" else "done"
+            db.update_project(self.conn, pid, tiktok_upload_status=new_status)
+            self._check_and_update_overall_done(pid)
+            self._select_project(pid)
+            
+        toggle_text = "Mark Pending" if tiktok_status == "done" else "Mark Deployed"
+        toggle_style = "secondary-outline" if tiktok_status == "done" else "success-outline"
+        ttk.Button(tiktok_ctrl_frame, text=toggle_text, bootstyle=toggle_style, command=toggle_tiktok_status).pack(side=RIGHT)
+        
+        tiktok_title_frame = ttk.Frame(tiktok_pad)
+        tiktok_title_frame.pack(fill=X, pady=3)
+        ttk.Label(tiktok_title_frame, text="TikTok Title:", width=15).pack(side=LEFT)
+        self._tiktok_title_body_var = tk.StringVar(value=tiktok_title_val)
+        self._tiktok_title_body_entry = ttk.Entry(tiktok_title_frame, textvariable=self._tiktok_title_body_var, state="normal" if is_editable else "readonly")
+        self._tiktok_title_body_entry.pack(side=LEFT, fill=X, expand=True)
+
+        ttk.Label(tiktok_pad, text="Caption / Description Body:").pack(anchor=W, pady=(5, 0))
+        self._tiktok_desc_body_text = tk.Text(tiktok_pad, height=3, wrap="word", bg="#2b2b3d", fg="#e0e0e0", insertbackground="#e0e0e0")
+        self._tiktok_desc_body_text.pack(fill=X, pady=3)
+        self._tiktok_desc_body_text.insert("1.0", tiktok_desc_val)
+        if not is_editable:
+            self._tiktok_desc_body_text.configure(state="disabled")
+        
+        tiktok_sched_frame = ttk.Frame(tiktok_pad)
+        tiktok_sched_frame.pack(fill=X, pady=5)
+        ttk.Label(tiktok_sched_frame, text="Schedule Time:").pack(side=LEFT)
+        
+        tiktok_time_val = project.get("tiktok_schedule_time", "")
+        tiktok_date_val, tiktok_time_only = "", ""
+        if tiktok_time_val:
+            try:
+                parts = tiktok_time_val.replace("T", " ").split(" ")
+                tiktok_date_val = parts[0]
+                tiktok_time_only = parts[1][:5]
+            except Exception:
+                pass
+        self._tiktok_date_entry = ttk.DateEntry(tiktok_sched_frame, bootstyle="info", width=12, dateformat="%Y-%m-%d")
+        self._tiktok_date_entry.pack(side=LEFT, padx=5)
+        if tiktok_date_val:
+            try:
+                self._tiktok_date_entry.entry.delete(0, tk.END)
+                self._tiktok_date_entry.entry.insert(0, tiktok_date_val)
+            except Exception:
+                pass
+        else:
+            try:
+                self._tiktok_date_entry.entry.delete(0, tk.END)
+            except Exception:
+                pass
+        self._tiktok_time_var = tk.StringVar(value=tiktok_time_only or "21:00")
+        self._tiktok_time_entry = ttk.Entry(tiktok_sched_frame, textvariable=self._tiktok_time_var, width=6, state="normal" if is_editable else "readonly")
+        self._tiktok_time_entry.pack(side=LEFT)
+        ttk.Label(tiktok_sched_frame, text=" (HH:MM - Local Time)", bootstyle="secondary").pack(side=LEFT, padx=3)
+
         # ------------------ ACTION BUTTONS FRAME ------------------
         if is_editable:
             actions = ttk.Frame(f)
@@ -969,6 +1357,12 @@ class PipelineApp(ttk.Window):
                     bootstyle="success-outline",
                     command=lambda: self._mark_project_done_direct(pid),
                 ).pack(side=LEFT, padx=5)
+                # Reset to Staged button
+                ttk.Button(
+                    actions, text="📁 Reset to Staged",
+                    bootstyle="warning-outline",
+                    command=lambda: self._reset_project_to_staged(pid),
+                ).pack(side=LEFT, padx=5)
             else:
                 ttk.Button(
                     actions, text="✅ Queue for Processing",
@@ -981,6 +1375,12 @@ class PipelineApp(ttk.Window):
                     bootstyle="success-outline",
                     command=lambda: self._mark_project_done_direct(pid),
                 ).pack(side=LEFT, padx=5)
+                if status == "error":
+                    ttk.Button(
+                        actions, text="📁 Reset to Staged",
+                        bootstyle="warning-outline",
+                        command=lambda: self._reset_project_to_staged(pid),
+                    ).pack(side=LEFT, padx=5)
 
             ttk.Button(
                 actions, text="🗑 Delete Project",
@@ -1054,10 +1454,62 @@ class PipelineApp(ttk.Window):
                     command=lambda p=preview_path: self._play_preview(p),
                 ).pack(side=RIGHT, padx=5)
 
+    def _show_canvas_candidates(self, candidates: list[dict],
+                                is_editable: bool = True):
+        """Display canvas candidates with play buttons."""
+        for w in self._canvas_candidates_frame.winfo_children():
+            w.destroy()
+
+        ttk.Label(
+            self._canvas_candidates_frame,
+            text=f"{len(candidates)} canvas candidates found:",
+            font=("Helvetica", 10),
+            bootstyle="secondary",
+        ).pack(anchor=W, pady=(0, 5))
+
+        for i, c in enumerate(candidates):
+            row = ttk.Frame(self._canvas_candidates_frame)
+            row.pack(fill=X, pady=2)
+
+            num = i + 1
+            start_m, start_s = divmod(c["start_time"], 60)
+            end_m, end_s = divmod(c["end_time"], 60)
+            dur_m, dur_s = divmod(c["duration"], 60)
+
+            text = (
+                f"#{num}  "
+                f"{int(start_m)}:{start_s:05.2f} → "
+                f"{int(end_m)}:{end_s:05.2f}  "
+                f"score: {c['score']:.3f}"
+            )
+
+            if is_editable:
+                ttk.Radiobutton(
+                    row, text=text,
+                    variable=self._canvas_pick_var, value=num,
+                    bootstyle="info",
+                ).pack(side=LEFT)
+            else:
+                ttk.Label(row, text=text).pack(side=LEFT)
+
+            preview_path = c.get("preview_path", "")
+            if preview_path and os.path.isfile(preview_path):
+                ttk.Button(
+                    row, text="▶",
+                    bootstyle="success-outline",
+                    width=3,
+                    command=lambda p=preview_path: self._play_preview(p),
+                ).pack(side=RIGHT, padx=5)
+
     def _show_processing_progress_panel(self, parent, project: dict):
-        """Show step-by-step progress for a processing project."""
+        """Show step-by-step progress for a processing or deploying project."""
         current = project.get("current_step", 0)
-        total = project.get("total_steps", 9)
+        status = project.get("status", "processing")
+        total = project.get("total_steps", 13)
+        if status == "deploying":
+            total = 12
+        elif status == "processing":
+            total = 13
 
         # Progress bar
         pct = int(100 * current / max(total, 1))
@@ -1225,7 +1677,7 @@ class PipelineApp(ttk.Window):
 
         def finish_schedule():
             def _thread():
-                from pipeline.upload import get_youtube_client, update_youtube_video_status
+                from pipeline.upload import get_youtube_client, update_youtube_video_status, sync_facebook_post_with_youtube_url, sync_youtube_short_with_main_url
                 yt_creds, err_creds = get_youtube_client(self.conn)
                 if not yt_creds:
                     self.after(0, lambda: messagebox.showerror("Error", f"YouTube credentials not found: {err_creds}"))
@@ -1240,8 +1692,20 @@ class PipelineApp(ttk.Window):
                 )
                 if success:
                     db.update_project(self.conn, pid, status="done", error_message="")
+                    
+                    # Update Facebook post & YouTube Short with the new YouTube URL!
+                    try:
+                        sync_facebook_post_with_youtube_url(self.conn, pid, log_callback=print)
+                    except Exception as sync_err:
+                        print(f"Error syncing Facebook post: {sync_err}")
+
+                    try:
+                        sync_youtube_short_with_main_url(self.conn, pid, log_callback=print)
+                    except Exception as sync_err:
+                        print(f"Error syncing YouTube Short: {sync_err}")
+
                     def done():
-                        messagebox.showinfo("Success", "YouTube main video has been successfully scheduled!")
+                        messagebox.showinfo("Success", "YouTube main video has been scheduled and Facebook post & YouTube Short updated with YouTube URL!")
                         self._select_project(pid)
                     self.after(0, done)
                 else:
@@ -1296,7 +1760,7 @@ class PipelineApp(ttk.Window):
 
         log_content = []
         for step in steps:
-            if step["status"] in ("done", "running", "error"):
+            if step["status"] in ("done", "running", "error") or (step.get("log_text") and step.get("log_text").strip()):
                 status_str = step["status"].upper()
                 log_content.append(f"=== Step {step['step_num']}: {step['step_name']} ({status_str}) ===")
                 if step.get("log_text"):
@@ -1366,10 +1830,13 @@ class PipelineApp(ttk.Window):
         yt_desc_body = self._yt_desc_body_text.get("1.0", "end-1c").strip()
         short_title_body = self._short_title_body_var.get().strip()
         short_desc_body = self._short_desc_body_text.get("1.0", "end-1c").strip()
+        tiktok_title_body = self._tiktok_title_body_var.get().strip() if hasattr(self, "_tiktok_title_body_var") else ""
+        tiktok_desc_body = self._tiktok_desc_body_text.get("1.0", "end-1c").strip() if hasattr(self, "_tiktok_desc_body_text") else ""
         
         fb_schedule_time = self._get_schedule_time(self._fb_date_entry, self._fb_time_var)
         yt_schedule_time = self._get_schedule_time(self._yt_date_entry, self._yt_time_var)
         short_schedule_time = self._get_schedule_time(self._short_date_entry, self._short_time_var)
+        tiktok_schedule_time = self._get_schedule_time(self._tiktok_date_entry, self._tiktok_time_var) if hasattr(self, "_tiktok_date_entry") else ""
 
         db.update_project(
             self.conn, pid,
@@ -1381,7 +1848,10 @@ class PipelineApp(ttk.Window):
             skip_shorts=int(not self._proc_shorts_var.get()),
             process_facebook=int(self._proc_fb_var.get()),
             process_youtube=int(self._proc_yt_var.get()),
+            process_tiktok=int(self._proc_tiktok_var.get()) if hasattr(self, "_proc_tiktok_var") else 0,
             negative_logo=int(self._neg_logo_var.get()),
+            short_source_fb=int(self._short_src_fb_var.get()),
+            generate_spotify_canvas=int(self._proc_canvas_var.get()),
             overlay_text=text,
             font_size=self._fontsize_var.get(),
             fade_in_start=self._fi_start_var.get(),
@@ -1390,15 +1860,22 @@ class PipelineApp(ttk.Window):
             fade_out_end=self._fo_end_var.get(),
             loop_pick=self._loop_pick_var.get(),
             loop_fade=self._loop_fade_var.get(),
+            spotify_canvas_pick=self._canvas_pick_var.get(),
+            loop_min_dur=self._loop_min_dur_var.get(),
+            loop_max_dur=self._loop_max_dur_var.get(),
             description_body=description_body,
             fb_post_body=fb_post_body,
             yt_title_body=yt_title_body,
             yt_description_body=yt_desc_body,
             short_title_body=short_title_body,
             short_description_body=short_desc_body,
+            tiktok_title_body=tiktok_title_body,
+            tiktok_description_body=tiktok_desc_body,
             fb_schedule_time=fb_schedule_time,
             yt_schedule_time=yt_schedule_time,
             short_schedule_time=short_schedule_time,
+            tiktok_schedule_time=tiktok_schedule_time,
+            tags=self._tags_entry_var.get().strip() if hasattr(self, "_tags_entry_var") else "",
         )
         self._refresh_list()
 
@@ -1413,18 +1890,27 @@ class PipelineApp(ttk.Window):
         proc_shorts = self._proc_shorts_var.get()
         proc_fb = self._proc_fb_var.get()
         proc_yt = self._proc_yt_var.get()
+        proc_tiktok = self._proc_tiktok_var.get() if hasattr(self, "_proc_tiktok_var") else False
+        short_src_fb = self._short_src_fb_var.get()
+
+        proc_canvas = self._proc_canvas_var.get()
 
         errors = []
-        if not proc_fb and not proc_yt and not proc_shorts:
-            errors.append("At least one target (Facebook, YouTube, or YouTube Short) must be enabled for processing")
+        if not proc_fb and not proc_yt and not proc_shorts and not proc_canvas and not proc_tiktok:
+            errors.append("At least one target (Facebook, YouTube, YouTube Short, TikTok Short, or Spotify Canvas) must be enabled for processing")
 
-        if proc_yt or proc_shorts:
-            if not yt_video or not os.path.isfile(yt_video):
-                errors.append("YouTube Video (Long) file is missing or not found")
-            if not audio or not os.path.isfile(audio):
-                errors.append("YouTube Audio (Long) file is missing or not found")
+        if proc_yt or proc_shorts or proc_canvas:
+            needs_yt_video = proc_canvas or (not short_src_fb and (proc_yt or proc_shorts))
+            if needs_yt_video:
+                if not yt_video or not os.path.isfile(yt_video):
+                    errors.append("YouTube Video (Long) file is missing or not found")
+            if proc_yt or proc_shorts:
+                if not audio or not os.path.isfile(audio):
+                    errors.append("YouTube Audio (Long) file is missing or not found")
             if proc_shorts and not text:
                 errors.append("YouTube short text is empty")
+            if proc_shorts and short_src_fb and (not fb_video or not os.path.isfile(fb_video)):
+                errors.append("'Use FB Video for Short' is enabled but Facebook Video (Short) file is missing or not found")
 
         if proc_fb:
             if not fb_video or not os.path.isfile(fb_video):
@@ -1478,6 +1964,299 @@ class PipelineApp(ttk.Window):
         self._refresh_list()
         self._select_project(pid)
 
+    def _reset_project_to_staged(self, pid: int):
+        if not messagebox.askyesno(
+            "Reset to Staged",
+            "Are you sure you want to move this project back to Staged?\n"
+            "This will clear the current process logs and set status to Staged.",
+        ):
+            return
+        db.update_project(
+            self.conn, pid,
+            status="staged",
+            current_step=0,
+            queued_at=None,
+            error_message="",
+        )
+        self.conn.execute("DELETE FROM process_log WHERE project_id = ?", (pid,))
+        self.conn.commit()
+        self._refresh_list()
+        self._select_project(pid)
+
+    def _generate_gemini_tags(self, pid: int):
+        api_key = db.get_setting(self.conn, "gemini_api_key", "").strip()
+        if not api_key:
+            messagebox.showwarning("Missing API Key", "Please configure your Gemini API Key in Settings first.")
+            return
+
+        project = db.get_project(self.conn, pid)
+        if not project:
+            return
+
+        desc_body = self._description_body_text.get("1.0", "end-1c").strip()
+        
+        if hasattr(self, "_gemini_tags_btn") and self._gemini_tags_btn:
+            self._gemini_tags_btn.configure(state="disabled", text="⚡ Generating...")
+
+        def thread_func():
+            try:
+                import requests
+                import base64
+                import mimetypes
+                
+                audio_path = project.get("audio_file")
+                audio_part = None
+                
+                if audio_path and os.path.isfile(audio_path):
+                    file_size = os.path.getsize(audio_path)
+                    if file_size <= 8 * 1024 * 1024:  # 8 MB safety limit to avoid HTTP 413 Payload Too Large
+                        try:
+                            mime_type, _ = mimetypes.guess_type(audio_path)
+                            if not mime_type:
+                                mime_type = "audio/mpeg" if audio_path.lower().endswith(".mp3") else "audio/wav"
+                            
+                            with open(audio_path, "rb") as af:
+                                audio_bytes = af.read()
+                                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                                
+                            audio_part = {
+                                "inlineData": {
+                                    "mimeType": mime_type,
+                                    "data": audio_b64
+                                }
+                            }
+                        except Exception:
+                            pass
+                
+                gemini_model = db.get_setting(self.conn, "gemini_model", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+                url = f"https://generativelanguage.googleapis.com/v1/models/{gemini_model}:generateContent?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                
+                parts = []
+                if audio_part:
+                    parts.append(audio_part)
+                    prompt = f"""
+We are publishing this relaxing music video on YouTube and Facebook.
+Please analyze the attached music/audio file and generate 10-15 high-quality tags/keywords for this video based on the music itself (genre, mood, instruments, rhythm, etc.) and the following metadata:
+- Title/Project Name: {project['name']}
+- Quote/Description: {desc_body}
+
+Generate ONLY a comma-separated list of clean tags (no hashtags, just lowercase tags. E.g. relaxing music, sleep music, ambient, etc.). Do not include any introductory text or explanation, just the tags themselves.
+"""
+                else:
+                    prompt = f"""
+We are publishing a relaxing music video on YouTube and Facebook.
+Please generate 10-15 high-quality tags/keywords for this video based on the following metadata:
+- Title/Project Name: {project['name']}
+- Music File: {os.path.basename(project['audio_file'] or '')}
+- Quote/Description: {desc_body}
+- Folder Path: {project['folder_path']}
+
+Generate ONLY a comma-separated list of clean tags (no hashtags, just lowercase tags. E.g. relaxing music, sleep music, ambient, etc.). Do not include any introductory text or explanation, just the tags themselves.
+"""
+                parts.append({"text": prompt})
+                
+                payload = {
+                    "contents": [{
+                        "parts": parts
+                    }]
+                }
+                
+                import time
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        res = requests.post(url, headers=headers, json=payload, timeout=180)
+                        if res.status_code == 503 and attempt < max_retries - 1:
+                            time.sleep(2 * (attempt + 1))
+                            continue
+                        res.raise_for_status()
+                        break
+                    except requests.exceptions.RequestException as e:
+                        if attempt == max_retries - 1:
+                            raise e
+                        time.sleep(2 * (attempt + 1))
+                
+                result = res.json()
+                if "candidates" not in result or not result["candidates"]:
+                    raise RuntimeError("No candidates returned. Response might be blocked by safety filters or empty.")
+                
+                candidate = result["candidates"][0]
+                if "content" not in candidate or "parts" not in candidate["content"] or not candidate["content"]["parts"]:
+                    finish_reason = candidate.get("finishReason", "UNKNOWN")
+                    raise RuntimeError(f"No content returned in candidate (Finish Reason: {finish_reason}).")
+                
+                generated_tags = candidate["content"]["parts"][0]["text"].strip()
+                
+                # Strip leading/trailing brackets, quotes or extra symbols if any
+                generated_tags = generated_tags.replace("[", "").replace("]", "").replace("`", "")
+                
+                def success(tags):
+                    current_tags = self._tags_entry_var.get().strip()
+                    base_tags = current_tags if current_tags else db.get_setting(self.conn, "default_tags", "")
+                    
+                    existing_list = []
+                    seen_lower = set()
+                    for t in base_tags.split(","):
+                        cleaned_t = t.strip()
+                        if cleaned_t:
+                            lower_t = cleaned_t.lower()
+                            if lower_t not in seen_lower:
+                                existing_list.append(cleaned_t)
+                                seen_lower.add(lower_t)
+                                
+                    new_list = []
+                    for t in tags.split(","):
+                        cleaned_t = t.strip()
+                        if cleaned_t:
+                            lower_t = cleaned_t.lower()
+                            if lower_t not in seen_lower:
+                                new_list.append(cleaned_t)
+                                seen_lower.add(lower_t)
+                                
+                    combined_list = existing_list + new_list
+                    cleaned = ", ".join(combined_list)
+                    self._tags_entry_var.set(cleaned)
+                    self._save_project(pid)
+                    messagebox.showinfo("Success", "Gemini successfully generated and added tags!")
+
+                self.after(0, lambda: success(generated_tags))
+            except Exception as e:
+                err_msg = str(e)
+                if hasattr(e, "response") and e.response is not None:
+                    try:
+                        err_msg += f"\n\nServer Response: {e.response.text}"
+                    except Exception:
+                        pass
+                def failed(err):
+                    messagebox.showerror("Error", f"Failed to generate tags with Gemini: {err}")
+                self.after(0, lambda err_str=err_msg: failed(err_str))
+            finally:
+                def reset_btn():
+                    if hasattr(self, "_gemini_tags_btn") and self._gemini_tags_btn:
+                        self._gemini_tags_btn.configure(state="normal", text="✨ Gemini Tags")
+                self.after(0, reset_btn)
+
+        threading.Thread(target=thread_func, daemon=True).start()
+
+    def _generate_gemini_quote(self, pid: int):
+        api_key = db.get_setting(self.conn, "gemini_api_key", "").strip()
+        if not api_key:
+            messagebox.showwarning("Missing API Key", "Please configure your Gemini API Key in Settings first.")
+            return
+
+        project = db.get_project(self.conn, pid)
+        if not project:
+            return
+
+        rule_template = db.get_setting(
+            self.conn, "gemini_quote_template",
+            'Generate a two-sentence quote for this sleep song.  Keep it simple. Generate the quote for the song titled "{{title}}".'
+        )
+        rule_text = rule_template.replace("{{title}}", project["name"])
+
+        if hasattr(self, "_gemini_quote_btn") and self._gemini_quote_btn:
+            self._gemini_quote_btn.configure(state="disabled", text="⚡ Generating...")
+
+        def thread_func():
+            try:
+                import requests
+                gemini_model = db.get_setting(self.conn, "gemini_model", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+                url = f"https://generativelanguage.googleapis.com/v1/models/{gemini_model}:generateContent?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                prompt = f"""
+{rule_text}
+
+Additionally, select the best, most poetic part of that generated quote to be used as a short text overlay (max 100 characters, no hashtags).
+
+Please format your response as a raw JSON object with exactly two keys:
+"quote": "the full generated two-sentence quote"
+"short_text": "the best, most poetic part of the quote"
+
+Do not include any other text, markdown formatting (like ```json), or explanations. Return only the raw JSON.
+"""
+                payload = {
+                    "contents": [{
+                        "parts": [{"text": prompt}]
+                    }]
+                }
+                import time
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        res = requests.post(url, headers=headers, json=payload, timeout=60)
+                        if res.status_code == 503 and attempt < max_retries - 1:
+                            time.sleep(2 * (attempt + 1))
+                            continue
+                        res.raise_for_status()
+                        break
+                    except requests.exceptions.RequestException as e:
+                        if attempt == max_retries - 1:
+                            raise e
+                        time.sleep(2 * (attempt + 1))
+                
+                result = res.json()
+                if "candidates" not in result or not result["candidates"]:
+                    raise RuntimeError("No candidates returned. Response might be blocked by safety filters or empty.")
+                
+                candidate = result["candidates"][0]
+                if "content" not in candidate or "parts" not in candidate["content"] or not candidate["content"]["parts"]:
+                    finish_reason = candidate.get("finishReason", "UNKNOWN")
+                    raise RuntimeError(f"No content returned in candidate (Finish Reason: {finish_reason}).")
+                
+                text_response = candidate["content"]["parts"][0]["text"].strip()
+                
+                # Strip markdown json block wrappers if Gemini ignored the instruction
+                if text_response.startswith("```"):
+                    lines = text_response.splitlines()
+                    if len(lines) >= 3:
+                        text_response = "\n".join(lines[1:-1]).strip()
+                        if text_response.startswith("json"):
+                            text_response = text_response[4:].strip()
+                
+                # Parse JSON
+                data = json.loads(text_response)
+                quote_val = data.get("quote", "").strip()
+                short_text_val = data.get("short_text", "").strip()
+
+                def success(q, s):
+                    # Update description body in UI
+                    self._description_body_text.delete("1.0", tk.END)
+                    self._description_body_text.insert("1.0", q)
+                    
+                    # Update Short Text (overlay text) in Tab 2
+                    self._text_widget.configure(state="normal")
+                    self._text_widget.delete("1.0", tk.END)
+                    self._text_widget.insert("1.0", s)
+                    if self.selected_project_id != pid or self._current_detail_project_status not in ("staged", "error", "queued", "pending_deployment", "done"):
+                        self._text_widget.configure(state="disabled")
+                    
+                    # Run template updates to re-render facebook/youtube posts
+                    if hasattr(self, "_re_render_all_templates_callback") and self._re_render_all_templates_callback:
+                        self._re_render_all_templates_callback(show_info=False)
+                    
+                    self._save_project(pid)
+                    messagebox.showinfo("Success", "Gemini successfully generated the quote and short text!")
+
+                self.after(0, lambda: success(quote_val, short_text_val))
+            except Exception as e:
+                err_msg = str(e)
+                if hasattr(e, "response") and e.response is not None:
+                    try:
+                        err_msg += f"\n\nServer Response: {e.response.text}"
+                    except Exception:
+                        pass
+                def failed(err):
+                    messagebox.showerror("Error", f"Failed to generate quote with Gemini: {err}")
+                self.after(0, lambda err_str=err_msg: failed(err_str))
+            finally:
+                def reset_btn():
+                    if hasattr(self, "_gemini_quote_btn") and self._gemini_quote_btn:
+                        self._gemini_quote_btn.configure(state="normal", text="✨ Gemini Quote")
+                self.after(0, reset_btn)
+
+        threading.Thread(target=thread_func, daemon=True).start()
+
     def _mark_project_done_direct(self, pid: int):
         if not messagebox.askyesno(
             "Mark Done",
@@ -1488,12 +2267,16 @@ class PipelineApp(ttk.Window):
         db.update_project(
             self.conn, pid,
             status="done",
-            current_step=12,
+            current_step=14,
+            fb_upload_status="done",
+            yt_upload_status="done",
+            short_upload_status="done",
+            tiktok_upload_status="done",
             error_message="",
         )
         # Seed fake/noop steps in the process log so it displays correctly
         self.conn.execute("DELETE FROM process_log WHERE project_id = ?", (pid,))
-        for step_num in range(1, 13):
+        for step_num in range(1, 15):
             self.conn.execute(
                 """INSERT INTO process_log 
                    (project_id, step_num, step_name, status, output_file, log_text)
@@ -1511,11 +2294,12 @@ class PipelineApp(ttk.Window):
             fb_upload_status="pending",
             yt_upload_status="pending",
             short_upload_status="pending",
+            tiktok_upload_status="pending",
             error_message="",
         )
         self.conn.execute(
             "UPDATE process_log SET status = 'pending', started_at = NULL, finished_at = NULL, output_file = '', log_text = '' "
-            "WHERE project_id = ? AND step_num IN (10, 11, 12)",
+            "WHERE project_id = ? AND step_num IN (10, 11, 12, 14)",
             (pid,)
         )
         self.conn.commit()
@@ -1533,13 +2317,14 @@ class PipelineApp(ttk.Window):
         deploy_fb = self._deploy_fb_var.get() if hasattr(self, "_deploy_fb_var") else True
         deploy_yt = self._deploy_yt_var.get() if hasattr(self, "_deploy_yt_var") else True
         deploy_short = self._deploy_short_var.get() if hasattr(self, "_deploy_short_var") else True
+        deploy_tiktok = self._deploy_tiktok_var.get() if hasattr(self, "_deploy_tiktok_var") else True
 
         # Check if at least one selected platform is going to be deployed
-        any_selected = deploy_fb or deploy_yt or deploy_short
+        any_selected = deploy_fb or deploy_yt or deploy_short or deploy_tiktok
         if not any_selected:
             messagebox.showwarning(
                 "No Platforms Selected",
-                "Please check at least one platform to deploy (Facebook, YouTube Long, or YouTube Short)."
+                "Please check at least one platform to deploy (Facebook, YouTube Long, YouTube Short, or TikTok Short)."
             )
             return
 
@@ -1559,6 +2344,12 @@ class PipelineApp(ttk.Window):
                 creds, err = get_youtube_client(self.conn)
                 if not creds:
                     errors.append(f"YouTube credentials: {err}")
+
+        if deploy_tiktok:
+            from pipeline.upload import get_tiktok_client
+            tt_creds, err_tt = get_tiktok_client(self.conn)
+            if not tt_creds:
+                errors.append(f"TikTok credentials: {err_tt}")
                 
         if errors:
             messagebox.showwarning(
@@ -1573,12 +2364,12 @@ class PipelineApp(ttk.Window):
         
         thread = threading.Thread(
             target=self._run_deployment_thread,
-            args=(pid, deploy_fb, deploy_yt, deploy_short),
+            args=(pid, deploy_fb, deploy_yt, deploy_short, deploy_tiktok),
             daemon=True
         )
         thread.start()
 
-    def _run_deployment_thread(self, pid: int, deploy_fb: bool, deploy_yt: bool, deploy_short: bool):
+    def _run_deployment_thread(self, pid: int, deploy_fb: bool, deploy_yt: bool, deploy_short: bool, deploy_tiktok: bool = True):
         conn = db.get_connection(DB_PATH)
         
         def notify(step_num, status, msg):
@@ -1591,22 +2382,27 @@ class PipelineApp(ttk.Window):
                 
             folder = project["folder_path"]
             name = project["name"]
+            tags_str = project.get("tags", "")
+            tags_list = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
             
             fb_video_path = os.path.join(folder, f"{name} 4k - Facebook.mp4")
             yt_video_path = os.path.join(folder, f"{name} 4k (Video).mp4")
             short_video_path = os.path.join(folder, f"{name} - YouTube Short.mp4")
             
-            # Ensure steps 10-12 exist in process_log
+            # Ensure steps 10-12, 14 exist in process_log
             existing_steps = {s["step_num"]: s for s in db.get_steps(conn, pid)}
-            for step_num in (10, 11, 12):
+            for step_num in (10, 11, 12, 14):
                 if step_num not in existing_steps:
                     db.log_step(conn, pid, step_num, STEP_NAMES[step_num], "pending")
                     
             from pipeline.upload import (
                 upload_to_facebook_page,
                 upload_to_youtube,
+                upload_to_tiktok,
                 get_youtube_client,
-                render_template
+                get_tiktok_client,
+                render_template,
+                sync_facebook_post_with_youtube_url
             )
             
             errors = []
@@ -1624,17 +2420,22 @@ class PipelineApp(ttk.Window):
                         db.update_project(conn, pid, current_step=10)
                         notify(10, "running", "Uploading Facebook Video...")
                         
-                        fb_page_id = db.get_setting(conn, "fb_page_id", "")
-                        fb_token = db.get_setting(conn, "fb_page_token", "")
+                        fb_page_id = db.get_setting(conn, "fb_page_id", "").strip()
+                        fb_token = db.get_setting(conn, "fb_page_token", "").strip()
+                        if not fb_token:
+                            fb_token = db.get_setting(conn, "fb_long_user_token", "").strip()
                         fb_desc = render_template(project.get("fb_post_body", ""), project.get("overlay_text", ""), name)
                         
+                        fb_log_lines = []
                         def log_cb_fb(txt):
-                            db.update_step(conn, pid, 10, log_text=txt)
-                            notify(10, "running", "Uploading Facebook Video...")
+                            fb_log_lines.append(txt)
+                            db.update_step(conn, pid, 10, log_text="\n".join(fb_log_lines))
+                            notify(10, "running", txt)
                             
                         vid_id, err = upload_to_facebook_page(
                             fb_page_id, fb_token, fb_video_path,
                             name, fb_desc, project.get("fb_schedule_time", ""),
+                            tags=tags_list,
                             log_callback=log_cb_fb
                         )
                         
@@ -1646,6 +2447,15 @@ class PipelineApp(ttk.Window):
                             db.update_step(conn, pid, 10, status="done", finished_at=datetime.now().isoformat(), output_file=vid_id, log_text=f"Uploaded successfully. Video ID: {vid_id}")
                             db.update_project(conn, pid, fb_upload_status="done")
                             notify(10, "done", "Facebook Video Uploaded")
+                            
+                            # Sync Facebook post with YouTube URL if YouTube video is already uploaded
+                            try:
+                                ok_sync, msg_sync = sync_facebook_post_with_youtube_url(conn, pid, log_callback=log_cb_fb)
+                                if ok_sync:
+                                    fb_log_lines.append(f"Facebook Post Sync: {msg_sync}")
+                                    db.update_step(conn, pid, 10, log_text="\n".join(fb_log_lines))
+                            except Exception:
+                                pass
                 else:
                     db.update_step(conn, pid, 10, status="done", log_text="Bypassed (Facebook already uploaded)")
             else:
@@ -1682,15 +2492,18 @@ class PipelineApp(ttk.Window):
                                 (os.path.isfile(yt_video_path) and os.path.isfile(short_video_path))
                             )
                             
+                            yt_log_lines = []
                             def log_cb_yt(txt):
-                                db.update_step(conn, pid, 11, log_text=txt)
-                                notify(11, "running", "Uploading YouTube Video...")
+                                yt_log_lines.append(txt)
+                                db.update_step(conn, pid, 11, log_text="\n".join(yt_log_lines))
+                                notify(11, "running", txt)
                                 
                             vid_id, err = upload_to_youtube(
                                 yt_creds, yt_video_path,
                                 yt_title, yt_desc,
                                 schedule_time_iso="" if is_both_yt else project.get("yt_schedule_time", ""),
                                 privacy_status="unlisted" if is_both_yt else "public",
+                                tags=tags_list,
                                 log_callback=log_cb_yt
                             )
                             
@@ -1702,6 +2515,24 @@ class PipelineApp(ttk.Window):
                                 db.update_step(conn, pid, 11, status="done", finished_at=datetime.now().isoformat(), output_file=vid_id, log_text=f"Uploaded successfully. Video ID: {vid_id}")
                                 db.update_project(conn, pid, yt_upload_status="done")
                                 notify(11, "done", "YouTube Video Uploaded")
+                                
+                                # Automatically update Facebook post & YouTube Short descriptions with the new YouTube URL
+                                try:
+                                    ok_sync, msg_sync = sync_facebook_post_with_youtube_url(conn, pid, log_callback=log_cb_yt)
+                                    if ok_sync:
+                                        yt_log_lines.append(f"Facebook Post Sync: {msg_sync}")
+                                        db.update_step(conn, pid, 11, log_text="\n".join(yt_log_lines))
+                                except Exception:
+                                    pass
+
+                                try:
+                                    from pipeline.upload import sync_youtube_short_with_main_url
+                                    ok_sync_s, msg_sync_s = sync_youtube_short_with_main_url(conn, pid, log_callback=log_cb_yt)
+                                    if ok_sync_s:
+                                        yt_log_lines.append(f"YouTube Short Sync: {msg_sync_s}")
+                                        db.update_step(conn, pid, 11, log_text="\n".join(yt_log_lines))
+                                except Exception:
+                                    pass
                 else:
                     db.update_step(conn, pid, 11, status="done", log_text="Bypassed (YouTube Long already uploaded)")
             else:
@@ -1730,16 +2561,27 @@ class PipelineApp(ttk.Window):
                             db.update_project(conn, pid, current_step=12)
                             notify(12, "running", "Uploading YouTube Short...")
                             
-                            short_title = render_template(project.get("short_title_body", ""), project.get("overlay_text", ""), name)
-                            short_desc = render_template(project.get("short_description_body", ""), project.get("overlay_text", ""), name)
+                            main_yt_id = ""
+                            for s in db.get_steps(conn, pid):
+                                if s["step_num"] == 11 and s.get("output_file") and not s["output_file"].startswith("Bypassed"):
+                                    main_yt_id = s["output_file"]
+                                    break
+                            short_yt_url = f"https://www.youtube.com/watch?v={main_yt_id}" if main_yt_id else ""
+                            short_overlay = project.get("overlay_text", "")
+
+                            short_title = render_template(project.get("short_title_body", ""), project.get("overlay_text", ""), name, yt_url=short_yt_url, overlay_text=short_overlay)
+                            short_desc = render_template(project.get("short_description_body", ""), project.get("overlay_text", ""), name, yt_url=short_yt_url, overlay_text=short_overlay)
                             
+                            short_log_lines = []
                             def log_cb_short(txt):
-                                db.update_step(conn, pid, 12, log_text=txt)
-                                notify(12, "running", "Uploading YouTube Short...")
+                                short_log_lines.append(txt)
+                                db.update_step(conn, pid, 12, log_text="\n".join(short_log_lines))
+                                notify(12, "running", txt)
                                 
                             vid_id, err = upload_to_youtube(
                                 yt_creds, short_video_path,
                                 short_title, short_desc, project.get("short_schedule_time", ""),
+                                tags=tags_list,
                                 log_callback=log_cb_short
                             )
                             
@@ -1751,6 +2593,16 @@ class PipelineApp(ttk.Window):
                                 db.update_step(conn, pid, 12, status="done", finished_at=datetime.now().isoformat(), output_file=vid_id, log_text=f"Uploaded successfully. Video ID: {vid_id}")
                                 db.update_project(conn, pid, short_upload_status="done")
                                 notify(12, "done", "YouTube Short Uploaded")
+
+                                # Automatically post comment on Short linking to main video if main video exists
+                                try:
+                                    from pipeline.upload import post_youtube_short_comment
+                                    ok_c, msg_c = post_youtube_short_comment(conn, pid, log_callback=log_cb_short)
+                                    if ok_c:
+                                        short_log_lines.append(f"Comment: {msg_c}")
+                                        db.update_step(conn, pid, 12, log_text="\n".join(short_log_lines))
+                                except Exception:
+                                    pass
                 else:
                     db.update_step(conn, pid, 12, status="done", log_text="Bypassed (YouTube Short already uploaded)")
             else:
@@ -1758,6 +2610,69 @@ class PipelineApp(ttk.Window):
                     db.update_step(conn, pid, 12, status="done", log_text="YouTube Short marked as completed")
                 else:
                     db.update_step(conn, pid, 12, status="pending", log_text="Skipped in this deployment run (unchecked)")
+
+            # ----------------- TIKTOK SHORT UPLOAD (Step 14) -----------------
+            if deploy_tiktok:
+                if project.get("tiktok_upload_status") != "done":
+                    if not os.path.isfile(short_video_path):
+                        err_msg = f"Short video file not found for TikTok: {short_video_path}"
+                        errors.append(err_msg)
+                        db.update_step(conn, pid, 14, status="error", log_text=err_msg)
+                        db.update_project(conn, pid, tiktok_upload_status="error")
+                    else:
+                        tt_creds, err_tt = get_tiktok_client(conn)
+                        if not tt_creds:
+                            errors.append(f"TikTok credentials: {err_tt}")
+                            db.update_step(conn, pid, 14, status="error", log_text=err_tt)
+                            db.update_project(conn, pid, tiktok_upload_status="error")
+                        else:
+                            db.update_step(conn, pid, 14, status="running", started_at=datetime.now().isoformat())
+                            db.update_project(conn, pid, current_step=14)
+                            notify(14, "running", "Uploading TikTok Short...")
+                            
+                            main_yt_id = ""
+                            for s in db.get_steps(conn, pid):
+                                if s["step_num"] == 11 and s.get("output_file") and not s["output_file"].startswith("Bypassed"):
+                                    main_yt_id = s["output_file"]
+                                    break
+                            tt_yt_url = f"https://www.youtube.com/watch?v={main_yt_id}" if main_yt_id else ""
+                            tt_overlay = project.get("overlay_text", "")
+
+                            tt_title = render_template(project.get("tiktok_title_body", ""), project.get("overlay_text", ""), name, yt_url=tt_yt_url, overlay_text=tt_overlay)
+                            tt_desc = render_template(project.get("tiktok_description_body", ""), project.get("overlay_text", ""), name, yt_url=tt_yt_url, overlay_text=tt_overlay)
+                            
+                            tt_log_lines = []
+                            def log_cb_tt(txt):
+                                tt_log_lines.append(txt)
+                                db.update_step(conn, pid, 14, log_text="\n".join(tt_log_lines))
+                                notify(14, "running", txt)
+                                
+                            pub_id, err = upload_to_tiktok(
+                                tt_creds.get("access_token", ""),
+                                short_video_path,
+                                title=tt_title,
+                                description=tt_desc,
+                                schedule_time_iso=project.get("tiktok_schedule_time", ""),
+                                tags=tags_list,
+                                log_callback=log_cb_tt,
+                                conn=conn
+                            )
+                            
+                            if err:
+                                errors.append(f"TikTok upload: {err}")
+                                db.update_step(conn, pid, 14, status="error", finished_at=datetime.now().isoformat(), log_text=f"Error: {err}")
+                                db.update_project(conn, pid, tiktok_upload_status="error")
+                            else:
+                                db.update_step(conn, pid, 14, status="done", finished_at=datetime.now().isoformat(), output_file=pub_id, log_text=f"Uploaded successfully to TikTok. Publish ID: {pub_id}")
+                                db.update_project(conn, pid, tiktok_upload_status="done")
+                                notify(14, "done", "TikTok Short Uploaded")
+                else:
+                    db.update_step(conn, pid, 14, status="done", log_text="Bypassed (TikTok already uploaded)")
+            else:
+                if project.get("tiktok_upload_status") == "done":
+                    db.update_step(conn, pid, 14, status="done", log_text="TikTok marked as completed")
+                else:
+                    db.update_step(conn, pid, 14, status="pending", log_text="Skipped in this deployment run (unchecked)")
                 
             # Finalize
             if errors:
@@ -1783,12 +2698,17 @@ class PipelineApp(ttk.Window):
                     os.path.isfile(short_video_path) or
                     project.get("short_upload_status") == "done"
                 )
+                need_tiktok = (
+                    bool(project.get("process_tiktok") if project.get("process_tiktok") is not None else 0) or
+                    project.get("tiktok_upload_status") == "done"
+                )
                 
                 fb_ok = not need_fb or (project.get("fb_upload_status") == "done")
                 yt_ok = not need_yt or (project.get("yt_upload_status") == "done")
                 short_ok = not need_short or (project.get("short_upload_status") == "done")
+                tiktok_ok = not need_tiktok or (project.get("tiktok_upload_status") == "done")
                 
-                all_done = fb_ok and yt_ok and short_ok
+                all_done = fb_ok and yt_ok and short_ok and tiktok_ok
                 
                 if not all_done:
                     db.update_project(conn, pid, status="pending_deployment", error_message="")
@@ -1883,11 +2803,18 @@ class PipelineApp(ttk.Window):
                 state="disabled", text="Analyzing…",
             )
 
+        min_dur = self._loop_min_dur_var.get()
+        max_dur = self._loop_max_dur_var.get()
+        max_dur_val = max_dur if max_dur > 0.0 else None
+
         def _work():
             try:
                 proxy_path, candidates = generate_all_previews(
                     video, audio, project["folder_path"],
                     n_candidates=5,
+                    force=True,
+                    min_duration=min_dur,
+                    max_duration=max_dur_val,
                     progress_callback=lambda msg, pct: self.after(
                         0, lambda m=msg: self._update_analyze_status(m),
                     ),
@@ -1912,16 +2839,807 @@ class PipelineApp(ttk.Window):
     def _update_analyze_status(self, msg: str):
         if hasattr(self, "_analyze_btn"):
             self._analyze_btn.configure(text=msg)
+        if hasattr(self, "_analyze_canvas_btn"):
+            self._analyze_canvas_btn.configure(text=msg)
 
     def _reset_analyze_btn(self):
         if hasattr(self, "_analyze_btn"):
             self._analyze_btn.configure(
                 state="normal", text="▶ Analyze Loops",
             )
+        if hasattr(self, "_analyze_canvas_btn"):
+            self._analyze_canvas_btn.configure(
+                state="normal", text="▶ Analyze Canvas",
+            )
+
+    def _analyze_canvas(self, pid: int):
+        video = self._yt_video_var.get()
+        audio = self._audio_var.get()
+
+        if not video or not os.path.isfile(video):
+            messagebox.showwarning("Missing", "Please select a YouTube Video (Long) first.")
+            return
+
+        project = db.get_project(self.conn, pid)
+        if not project:
+            return
+
+        self._save_project(pid)
+
+        if hasattr(self, "_analyze_canvas_btn"):
+            self._analyze_canvas_btn.configure(
+                state="disabled", text="Analyzing…",
+            )
+
+        def _work():
+            try:
+                from pipeline.preview import generate_canvas_previews
+                proxy_path, candidates = generate_canvas_previews(
+                    video, audio, project["folder_path"],
+                    n_candidates=5,
+                    force=True,
+                    progress_callback=lambda msg, pct: self.after(
+                        0, lambda m=msg: self._update_analyze_status(m),
+                    ),
+                )
+                candidates_json = json.dumps(candidates, default=str)
+                db.update_project(
+                    self.conn, pid,
+                    proxy_path=proxy_path,
+                    spotify_candidates_json=candidates_json,
+                )
+                self.after(0, lambda: self._on_analysis_complete(pid))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror(
+                    "Analysis Failed", str(e),
+                ))
+                self.after(0, lambda: self._reset_analyze_btn())
+
+        threading.Thread(target=_work, daemon=True).start()
+
 
     def _on_analysis_complete(self, pid: int):
         self._reset_analyze_btn()
         self._select_project(pid)
+
+    # ------------------------------------------------------------------
+    # Interesting Image / Keyframe Extractor
+    # ------------------------------------------------------------------
+
+    def _resolve_img_source_path(self, project: dict, src_type: str) -> str:
+        """Resolves the video file path based on source type selection."""
+        folder = project.get("folder_path", "")
+        name = project.get("name", "")
+
+        if src_type == "yt_short":
+            # 1. Rendered YouTube Short
+            short_out = os.path.join(folder, f"{name} - YouTube Short.mp4")
+            if os.path.isfile(short_out):
+                return short_out
+            # 2. Rendered FB 4K
+            fb_out = os.path.join(folder, f"{name} 4k - Facebook.mp4")
+            if os.path.isfile(fb_out):
+                return fb_out
+            # 3. Source Facebook video
+            fb_src = project.get("facebook_video", "")
+            if fb_src and os.path.isfile(fb_src):
+                return fb_src
+            return fb_src or short_out
+
+        elif src_type == "custom":
+            return getattr(self, "_img_custom_path_var", tk.StringVar()).get()
+
+        else:  # "yt_long"
+            # 1. Rendered 4K long video
+            yt_out = os.path.join(folder, f"{name} 4k (Video).mp4")
+            if os.path.isfile(yt_out):
+                return yt_out
+            # 2. Source long video
+            yt_src = project.get("youtube_video", "") or project.get("video_file", "")
+            if yt_src and os.path.isfile(yt_src):
+                return yt_src
+            return yt_src or yt_out
+
+    def _update_img_source_info(self, video_path: str):
+        """Updates duration/resolution info label for selected video."""
+        if not hasattr(self, "_img_src_info_label") or not self._img_src_info_label.winfo_exists():
+            return
+        if not video_path or not os.path.isfile(video_path):
+            self._img_src_info_label.configure(
+                text="⚠️ File not found or not yet generated.",
+                bootstyle="warning",
+            )
+            return
+
+        try:
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                dur = frames / fps if fps > 0 else 0.0
+                cap.release()
+
+                m, s = divmod(dur, 60.0)
+                size_mb = os.path.getsize(video_path) / (1024 * 1024)
+                self._img_src_info_label.configure(
+                    text=f"🎬 {w}×{h} • {fps:.2f} fps • Duration: {int(m):02d}:{s:05.2f} • Size: {size_mb:.1f} MB",
+                    bootstyle="success",
+                )
+                return
+        except Exception:
+            pass
+
+        self._img_src_info_label.configure(
+            text="✅ File ready for analysis.",
+            bootstyle="secondary",
+        )
+
+    def _on_img_source_type_changed(self, project: dict):
+        src_type = self._img_source_type_var.get()
+        path = self._resolve_img_source_path(project, src_type)
+        self._img_src_path_var.set(path)
+        self._update_img_source_info(path)
+
+        if hasattr(self, "_img_browse_btn"):
+            if src_type == "custom":
+                self._img_browse_btn.configure(state="normal")
+            else:
+                self._img_browse_btn.configure(state="normal")
+
+    def _browse_img_source_file(self, project: dict):
+        initialdir = project.get("folder_path", "")
+        chosen = filedialog.askopenfilename(
+            title="Select Video File",
+            filetypes=[("Video files", "*.mp4 *.mov *.avi *.mkv *.webm"), ("All files", "*.*")],
+            initialdir=initialdir if os.path.isdir(initialdir) else None,
+        )
+        if chosen:
+            self._img_source_type_var.set("custom")
+            self._img_custom_path_var.set(chosen)
+            self._img_src_path_var.set(chosen)
+            self._update_img_source_info(chosen)
+
+    def _build_interesting_images_tab(self, parent, project: dict):
+        """Constructs the tab interface for identifying and exporting interesting images."""
+        # Clean state for new project view
+        self._interesting_img_thumbnails.clear()
+        self._current_interesting_candidates.clear()
+        self._interesting_cand_vars.clear()
+
+        # 1. Compact Header & Video Controls Frame
+        ctrl_box = ttk.LabelFrame(parent, text="Source Video & Settings")
+        ctrl_box.pack(fill=X, pady=(0, 10))
+
+        ctrl_pad = ttk.Frame(ctrl_box, padding=(10, 8, 10, 8))
+        ctrl_pad.pack(fill=X)
+
+        # Row 1: Source Radio Buttons + Browse
+        row1 = ttk.Frame(ctrl_pad)
+        row1.pack(fill=X, pady=(0, 5))
+
+        self._img_source_type_var = tk.StringVar(value="yt_long")
+        self._img_custom_path_var = tk.StringVar(value="")
+
+        ttk.Radiobutton(
+            row1, text="YouTube Long Video (16:9)",
+            variable=self._img_source_type_var, value="yt_long",
+            command=lambda: self._on_img_source_type_changed(project),
+            bootstyle="info",
+        ).pack(side=LEFT, padx=(0, 15))
+
+        ttk.Radiobutton(
+            row1, text="YouTube Short (9:16)",
+            variable=self._img_source_type_var, value="yt_short",
+            command=lambda: self._on_img_source_type_changed(project),
+            bootstyle="info",
+        ).pack(side=LEFT, padx=(0, 15))
+
+        ttk.Radiobutton(
+            row1, text="Custom Video…",
+            variable=self._img_source_type_var, value="custom",
+            command=lambda: self._on_img_source_type_changed(project),
+            bootstyle="info",
+        ).pack(side=LEFT, padx=(0, 10))
+
+        self._img_browse_btn = ttk.Button(
+            row1, text="Browse…", bootstyle="secondary-outline",
+            command=lambda: self._browse_img_source_file(project),
+        )
+        self._img_browse_btn.pack(side=RIGHT)
+
+        # Row 2: Selected path & info
+        row2 = ttk.Frame(ctrl_pad)
+        row2.pack(fill=X, pady=(0, 8))
+
+        init_path = self._resolve_img_source_path(project, "yt_long")
+        self._img_src_path_var = tk.StringVar(value=init_path)
+
+        path_entry = ttk.Entry(row2, textvariable=self._img_src_path_var, state="readonly")
+        path_entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 10))
+
+        self._img_src_info_label = ttk.Label(row2, text="", font=("Helvetica", 9), bootstyle="secondary")
+        self._img_src_info_label.pack(side=RIGHT)
+        self._update_img_source_info(init_path)
+
+        # Row 3: Parameters & Action Button
+        row3 = ttk.Frame(ctrl_pad)
+        row3.pack(fill=X)
+
+        ttk.Label(row3, text="Top Images:").pack(side=LEFT, padx=(0, 5))
+        self._img_top_n_var = tk.IntVar(value=10)
+        ttk.Spinbox(
+            row3, from_=1, to=50, textvariable=self._img_top_n_var, width=4,
+        ).pack(side=LEFT, padx=(0, 15))
+
+        ttk.Label(row3, text="Min Sep (s):").pack(side=LEFT, padx=(0, 5))
+        self._img_min_sep_var = tk.DoubleVar(value=5.0)
+        ttk.Spinbox(
+            row3, from_=0.5, to=60.0, increment=0.5,
+            textvariable=self._img_min_sep_var, width=5,
+        ).pack(side=LEFT, padx=(0, 15))
+
+        ttk.Label(row3, text="Format:").pack(side=LEFT, padx=(0, 5))
+        self._img_format_var = tk.StringVar(value="PNG (Lossless)")
+        fmt_cb = ttk.Combobox(
+            row3, textvariable=self._img_format_var,
+            values=["PNG (Lossless)", "JPEG (High Quality)", "WEBP"],
+            state="readonly", width=18,
+        )
+        fmt_cb.pack(side=LEFT, padx=(0, 20))
+
+        self._img_analyze_btn = ttk.Button(
+            row3, text="✨ Find Most Interesting Images", bootstyle="primary",
+            command=lambda: self._start_project_image_analysis(project),
+        )
+        self._img_analyze_btn.pack(side=RIGHT)
+
+        # 2. Progress Container (initially hidden)
+        self._img_prog_frame = ttk.Frame(parent)
+        self._img_progress_bar = ttk.Progressbar(self._img_prog_frame, mode="determinate", bootstyle="info-striped")
+        self._img_progress_bar.pack(fill=X, pady=(5, 2))
+        self._img_status_label = ttk.Label(self._img_prog_frame, text="", font=("Helvetica", 9), bootstyle="secondary")
+        self._img_status_label.pack(anchor=W)
+
+        # 3. Results & Gallery Container
+        self._img_gallery_container = ttk.Frame(parent)
+        self._img_gallery_container.pack(fill=BOTH, expand=True, pady=5)
+
+        # Empty state prompt
+        self._render_empty_gallery_state()
+
+    def _render_empty_gallery_state(self):
+        for w in self._img_gallery_container.winfo_children():
+            w.destroy()
+        empty_box = ttk.Frame(self._img_gallery_container, padding=20)
+        empty_box.pack(fill=BOTH, expand=True)
+        ttk.Label(
+            empty_box,
+            text="🖼️ Click '✨ Find Most Interesting Images' to scan the video.",
+            font=("Helvetica", 11),
+            bootstyle="secondary",
+            justify=CENTER,
+        ).pack(pady=15)
+
+    def _start_project_image_analysis(self, project: dict):
+        """Runs the interesting frame extraction in a background thread."""
+        video_path = self._img_src_path_var.get().strip()
+        if not video_path or not os.path.isfile(video_path):
+            messagebox.showwarning("Missing Video", f"The selected video file does not exist:\n{video_path}")
+            return
+
+        n_top = self._img_top_n_var.get()
+        min_sep = self._img_min_sep_var.get()
+        project_name = project.get("name", "video")
+
+        # Disable button, show progress
+        self._img_analyze_btn.configure(state="disabled", text="Analyzing Frames…")
+        self._img_prog_frame.pack(fill=X, pady=(0, 10), before=self._img_gallery_container)
+        self._img_progress_bar.configure(value=0)
+        self._img_status_label.configure(text="Initializing video frame scanner…")
+
+        def _worker():
+            try:
+                candidates = analyze_interesting_frames(
+                    video_path,
+                    n_candidates=n_top,
+                    min_separation=min_sep,
+                    progress_callback=lambda msg, pct: self.after(
+                        0, lambda m=msg, p=pct: self._update_img_progress(m, p),
+                    ),
+                )
+                self.after(0, lambda: self._on_image_analysis_complete(candidates, video_path, project_name))
+            except Exception as e:
+                self.after(0, lambda err=str(e): self._on_image_analysis_error(err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _update_img_progress(self, msg: str, pct: int):
+        if hasattr(self, "_img_progress_bar") and self._img_progress_bar.winfo_exists():
+            self._img_progress_bar.configure(value=pct)
+        if hasattr(self, "_img_status_label") and self._img_status_label.winfo_exists():
+            self._img_status_label.configure(text=f"{msg} ({pct}%)")
+
+    def _on_image_analysis_error(self, err_msg: str):
+        if hasattr(self, "_img_prog_frame") and self._img_prog_frame.winfo_exists():
+            self._img_prog_frame.pack_forget()
+        if hasattr(self, "_img_analyze_btn") and self._img_analyze_btn.winfo_exists():
+            self._img_analyze_btn.configure(state="normal", text="✨ Find Most Interesting Images")
+        messagebox.showerror("Analysis Error", f"Failed to analyze interesting frames:\n{err_msg}")
+
+    def _on_image_analysis_complete(self, candidates: list[dict], video_path: str, project_name: str):
+        if hasattr(self, "_img_prog_frame") and self._img_prog_frame.winfo_exists():
+            self._img_prog_frame.pack_forget()
+        if hasattr(self, "_img_analyze_btn") and self._img_analyze_btn.winfo_exists():
+            self._img_analyze_btn.configure(state="normal", text="✨ Re-analyze Images")
+
+        self._current_interesting_candidates = candidates
+        self._render_interesting_images_gallery(self._img_gallery_container, candidates, video_path, project_name)
+
+    def _render_interesting_images_gallery(self, container, candidates: list[dict], video_path: str, project_name: str):
+        """Renders the top action toolbar and visual grid cards for extracted candidates."""
+        for w in container.winfo_children():
+            w.destroy()
+
+        if not candidates:
+            ttk.Label(
+                container, text="No interesting frames met the criteria.",
+                font=("Helvetica", 11), bootstyle="warning",
+            ).pack(pady=20)
+            return
+
+        # 1. Action Toolbar
+        toolbar = ttk.Frame(container)
+        toolbar.pack(fill=X, pady=(0, 10))
+
+        # Checkbox states
+        self._interesting_cand_vars.clear()
+        for c in candidates:
+            self._interesting_cand_vars[c["rank"]] = tk.BooleanVar(value=True)
+
+        self._img_count_label = ttk.Label(
+            toolbar,
+            text=f"✨ Found {len(candidates)} Top Frames ({len(candidates)} selected)",
+            font=("Helvetica", 11, "bold"),
+            bootstyle="success",
+        )
+        self._img_count_label.pack(side=LEFT, padx=(0, 15))
+
+        ttk.Button(
+            toolbar, text="Select All", bootstyle="secondary-outline",
+            command=lambda: self._toggle_all_image_selections(True),
+        ).pack(side=LEFT, padx=(0, 5))
+
+        ttk.Button(
+            toolbar, text="Deselect All", bootstyle="secondary-outline",
+            command=lambda: self._toggle_all_image_selections(False),
+        ).pack(side=LEFT, padx=(0, 15))
+
+        ttk.Button(
+            toolbar, text="💾 Export Selected…", bootstyle="success",
+            command=lambda: self._export_selected_images(video_path, project_name),
+        ).pack(side=RIGHT, padx=(5, 0))
+
+        ttk.Button(
+            toolbar, text="💾 Export All…", bootstyle="success-outline",
+            command=lambda: self._export_all_images(video_path, project_name),
+        ).pack(side=RIGHT, padx=(5, 0))
+
+        # 2. Card Gallery Grid
+        cards_frame = ttk.Frame(container)
+        cards_frame.pack(fill=BOTH, expand=True)
+
+        # Detect aspect ratio to choose optimal column layout
+        is_vertical = False
+        if candidates and candidates[0].get("height", 0) > candidates[0].get("width", 0):
+            is_vertical = True
+
+        cols = 3 if is_vertical else 2
+        for col_idx in range(cols):
+            cards_frame.columnconfigure(col_idx, weight=1, uniform="col")
+
+        max_thumb_size = 220 if is_vertical else 280
+
+        for idx, cand in enumerate(candidates):
+            row_idx = idx // cols
+            col_idx = idx % cols
+
+            rank = cand["rank"]
+            t_sec = cand["timestamp_sec"]
+            score = cand["overall_score"]
+            time_str = cand["time_str"]
+            w_px = cand["width"]
+            h_px = cand["height"]
+
+            card = ttk.LabelFrame(
+                cards_frame,
+                text=f"  Rank #{rank}  (Score: {score:.1f}/100)  ",
+            )
+            card.grid(row=row_idx, column=col_idx, padx=6, pady=6, sticky="nsew")
+
+            # Inner padding container
+            card_pad = ttk.Frame(card, padding=8)
+            card_pad.pack(fill=BOTH, expand=True)
+
+            # Header inside card
+            head_row = ttk.Frame(card_pad)
+            head_row.pack(fill=X, pady=(0, 4))
+
+            chk = ttk.Checkbutton(
+                head_row,
+                text=f"Select",
+                variable=self._interesting_cand_vars[rank],
+                command=self._on_image_checkbox_toggled,
+                bootstyle="success-square-toggle",
+            )
+            chk.pack(side=LEFT)
+
+            ttk.Label(
+                head_row,
+                text=f"⏱ {time_str} • {w_px}×{h_px}",
+                font=("Helvetica", 9, "bold"),
+                bootstyle="info",
+            ).pack(side=RIGHT)
+
+            # Thumbnail Image Preview (pre-extracted or on-demand)
+            thumb_key = f"{video_path}_{t_sec}_{rank}"
+            pil_thumb = cand.get("thumbnail_pil") or extract_thumbnail_image(video_path, t_sec, max_dim=max_thumb_size)
+            if pil_thumb:
+                tk_thumb = ImageTk.PhotoImage(pil_thumb)
+                self._interesting_img_thumbnails[thumb_key] = tk_thumb
+
+                img_lbl = ttk.Label(card_pad, image=tk_thumb, cursor="hand2")
+                img_lbl.image = tk_thumb
+                img_lbl.pack(pady=3)
+                img_lbl.bind(
+                    "<Button-1>",
+                    lambda e, v=video_path, t=t_sec, r=rank, s=score: self._show_fullsize_image_preview(
+                        v, t, f"Rank #{r} ({time_str}, Score {s:.1f})"
+                    ),
+                )
+            else:
+                ttk.Label(card_pad, text="[No Preview Available]", bootstyle="secondary").pack(pady=20)
+
+            # Metrics row
+            metrics_text = (
+                f"Sharp: {cand['sharpness']:.0f}  |  "
+                f"Color: {cand['colorfulness']:.1f}  |  "
+                f"Contrast: {cand['contrast']:.1f}  |  "
+                f"Entropy: {cand['entropy']:.2f}"
+            )
+            ttk.Label(
+                card_pad, text=metrics_text, font=("Helvetica", 8), bootstyle="secondary",
+            ).pack(pady=(2, 4))
+
+            # Action buttons
+            btn_row = ttk.Frame(card_pad)
+            btn_row.pack(fill=X, pady=(4, 0))
+
+            ttk.Button(
+                btn_row, text="👁 Preview", bootstyle="info-outline", width=10,
+                command=lambda v=video_path, t=t_sec, r=rank, s=score: self._show_fullsize_image_preview(
+                    v, t, f"Rank #{r} ({time_str}, Score {s:.1f})"
+                ),
+            ).pack(side=LEFT)
+
+            default_fn = f"{project_name}_rank{rank:02d}_{cand['time_str'].replace(':', 'm').replace('.', 's')}"
+            ttk.Button(
+                btn_row, text="💾 Save…", bootstyle="secondary-outline", width=8,
+                command=lambda v=video_path, c=cand, df=default_fn: self._export_single_image(v, c, df),
+            ).pack(side=RIGHT)
+
+        # Force geometry refresh and mousewheel scrolling on all newly rendered elements
+        self.update_idletasks()
+        if hasattr(self, "_detail_content") and self._detail_content and hasattr(self._detail_content, "enable_scrolling"):
+            try:
+                self._detail_content.enable_scrolling()
+            except Exception:
+                pass
+
+    def _toggle_all_image_selections(self, select: bool):
+        for var in self._interesting_cand_vars.values():
+            var.set(select)
+        self._on_image_checkbox_toggled()
+
+    def _on_image_checkbox_toggled(self):
+        if hasattr(self, "_img_count_label") and self._img_count_label.winfo_exists():
+            selected_count = sum(1 for v in self._interesting_cand_vars.values() if v.get())
+            total = len(self._interesting_cand_vars)
+            self._img_count_label.configure(
+                text=f"✨ Found {total} Top Frames ({selected_count} selected)"
+            )
+
+    def _get_export_format_ext(self) -> str:
+        fmt_str = getattr(self, "_img_format_var", tk.StringVar(value="PNG")).get()
+        if "JPEG" in fmt_str or "JPG" in fmt_str:
+            return "jpg"
+        elif "WEBP" in fmt_str:
+            return "webp"
+        return "png"
+
+    def _export_single_image(self, video_path: str, candidate: dict, default_name: str):
+        """Export a single frame with a Save As file dialog."""
+        ext = self._get_export_format_ext()
+        file_path = filedialog.asksaveasfilename(
+            title="Save Image As",
+            initialfile=f"{default_name}.{ext}",
+            defaultextension=f".{ext}",
+            filetypes=[(f"{ext.upper()} Image", f"*.{ext}"), ("All files", "*.*")],
+        )
+        if not file_path:
+            return
+
+        ok = export_frame(video_path, candidate["timestamp_sec"], file_path, img_format=ext)
+        if ok:
+            messagebox.showinfo("Export Successful", f"Saved full-resolution image to:\n{file_path}")
+        else:
+            messagebox.showerror("Export Failed", "Failed to extract and save the image.")
+
+    def _export_selected_images(self, video_path: str, project_name: str):
+        """Export all currently checked frames to a chosen directory."""
+        selected_candidates = [
+            c for c in self._current_interesting_candidates
+            if self._interesting_cand_vars.get(c["rank"], tk.BooleanVar()).get()
+        ]
+        if not selected_candidates:
+            messagebox.showwarning("No Selection", "Please select at least one image to export.")
+            return
+
+        self._run_batch_export_dialog(video_path, selected_candidates, project_name)
+
+    def _export_all_images(self, video_path: str, project_name: str):
+        """Export all analyzed candidate frames to a chosen directory."""
+        if not self._current_interesting_candidates:
+            messagebox.showwarning("No Images", "No analyzed images available to export.")
+            return
+        self._run_batch_export_dialog(video_path, self._current_interesting_candidates, project_name)
+
+    def _run_batch_export_dialog(self, video_path: str, candidates: list[dict], project_name: str):
+        export_dir = filedialog.askdirectory(title="Select Folder to Export Images")
+        if not export_dir:
+            return
+
+        ext = self._get_export_format_ext()
+        saved = batch_export_frames(
+            video_path,
+            candidates,
+            output_dir=export_dir,
+            prefix=project_name,
+            img_format=ext,
+        )
+
+        if saved:
+            res = messagebox.askyesno(
+                "Export Complete",
+                f"Successfully exported {len(saved)} image(s) to:\n{export_dir}\n\nOpen export folder in Finder/Explorer?",
+            )
+            if res:
+                self._open_in_file_manager(export_dir)
+        else:
+            messagebox.showerror("Export Failed", "Failed to export images.")
+
+    def _show_fullsize_image_preview(self, video_path: str, timestamp_sec: float, title_info: str):
+        """Opens a modal window showing the full-resolution extracted frame."""
+        rgb = extract_full_frame(video_path, timestamp_sec)
+        if rgb is None:
+            messagebox.showerror("Error", "Could not extract full-resolution frame.")
+            return
+
+        h, w = rgb.shape[:2]
+
+        dlg = ttk.Toplevel(self)
+        dlg.title(f"Frame Preview — {title_info}")
+        dlg.geometry("1100x780")
+        dlg.minsize(700, 500)
+        dlg.transient(self)
+
+        top_bar = ttk.Frame(dlg, padding=10)
+        top_bar.pack(fill=X)
+
+        ttk.Label(
+            top_bar,
+            text=f"🖼️ {title_info}",
+            font=("Helvetica", 12, "bold"),
+            bootstyle="inverse-dark",
+        ).pack(side=LEFT)
+
+        ttk.Label(
+            top_bar,
+            text=f"Original Resolution: {w} × {h} px",
+            font=("Helvetica", 10),
+            bootstyle="secondary",
+        ).pack(side=LEFT, padx=15)
+
+        ext = self._get_export_format_ext()
+        default_save_name = f"frame_{int(timestamp_sec)}s.{ext}"
+
+        ttk.Button(
+            top_bar, text="💾 Save Full-Resolution Image…", bootstyle="success",
+            command=lambda: self._export_single_image(
+                video_path, {"timestamp_sec": timestamp_sec}, default_save_name
+            ),
+        ).pack(side=RIGHT)
+
+        canvas = tk.Canvas(dlg, bg="#0d0d1a", highlightthickness=0)
+        canvas.pack(fill=BOTH, expand=True, padx=10, pady=(0, 10))
+
+        pil_orig = Image.fromarray(rgb)
+        dlg._preview_photo = None  # prevent GC
+
+        def _update_canvas_img(event=None):
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+            if cw < 10 or ch < 10:
+                cw, ch = 1000, 650
+            scale = min(cw / w, ch / h)
+            nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+            resized = pil_orig.resize((nw, nh), Image.Resampling.LANCZOS)
+            dlg._preview_photo = ImageTk.PhotoImage(resized)
+            canvas.delete("all")
+            canvas.create_image(cw // 2, ch // 2, anchor="center", image=dlg._preview_photo)
+
+        canvas.bind("<Configure>", _update_canvas_img)
+        dlg.after(50, _update_canvas_img)
+
+    def _open_standalone_frame_extractor(self):
+        """Opens a standalone modal dialog allowing interesting image extraction from ANY video file."""
+        dlg = ttk.Toplevel(self)
+        dlg.title("🖼️ Frame & Image Extractor")
+        dlg.geometry("1200x850")
+        dlg.minsize(900, 600)
+        dlg.transient(self)
+
+        content = ScrolledFrame(dlg, autohide=True)
+        content.pack(fill=BOTH, expand=True, padx=15, pady=15)
+
+        ttk.Label(
+            content,
+            text="🖼️ Video Frame & Interesting Image Extractor",
+            font=("Helvetica", 16, "bold"),
+            bootstyle="inverse-dark",
+        ).pack(anchor=W, pady=(0, 5))
+
+        ttk.Label(
+            content,
+            text="Select any YouTube long video, short, or local media file to extract its most interesting, sharp, and colorful frames.",
+            font=("Helvetica", 10),
+            bootstyle="secondary",
+        ).pack(anchor=W, pady=(0, 15))
+
+        # File Selection Frame
+        file_lf = ttk.LabelFrame(content, text="Select Video File")
+        file_lf.pack(fill=X, pady=(0, 10))
+
+        file_var = tk.StringVar()
+        file_row = ttk.Frame(file_lf, padding=(10, 5, 10, 0))
+        file_row.pack(fill=X, pady=(0, 5))
+
+        file_entry = ttk.Entry(file_row, textvariable=file_var)
+        file_entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 8))
+
+        info_lbl = ttk.Label(file_lf, text="", font=("Helvetica", 9), padding=(10, 0, 10, 8))
+        info_lbl.pack(anchor=W)
+
+        def _update_standalone_info(path):
+            if not path or not os.path.isfile(path):
+                info_lbl.configure(text="⚠️ Please select a valid video file.", bootstyle="warning")
+                return
+            try:
+                import cv2
+                cap = cv2.VideoCapture(path)
+                if cap.isOpened():
+                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    dur = frames / fps if fps > 0 else 0.0
+                    cap.release()
+                    m, s = divmod(dur, 60.0)
+                    size_mb = os.path.getsize(path) / (1024 * 1024)
+                    info_lbl.configure(
+                        text=f"🎬 {w}×{h} • {fps:.2f} fps • Duration: {int(m):02d}:{s:05.2f} • Size: {size_mb:.1f} MB",
+                        bootstyle="success",
+                    )
+            except Exception:
+                info_lbl.configure(text="✅ Ready for analysis.", bootstyle="secondary")
+
+        def _browse_standalone():
+            chosen = filedialog.askopenfilename(
+                title="Select Video File",
+                filetypes=[("Video files", "*.mp4 *.mov *.avi *.mkv *.webm"), ("All files", "*.*")],
+            )
+            if chosen:
+                file_var.set(chosen)
+                _update_standalone_info(chosen)
+
+        ttk.Button(
+            file_row, text="Browse…", bootstyle="primary-outline",
+            command=_browse_standalone,
+        ).pack(side=RIGHT)
+
+        # Settings Frame
+        set_lf = ttk.LabelFrame(content, text="Extraction Settings")
+        set_lf.pack(fill=X, pady=(0, 10))
+
+        set_row = ttk.Frame(set_lf, padding=(10, 8, 10, 8))
+        set_row.pack(fill=X, pady=5)
+
+        ttk.Label(set_row, text="Top Images:").pack(side=LEFT, padx=(0, 5))
+        top_n_var = tk.IntVar(value=10)
+        ttk.Spinbox(set_row, from_=1, to=50, textvariable=top_n_var, width=5).pack(side=LEFT, padx=(0, 20))
+
+        ttk.Label(set_row, text="Min Separation (s):").pack(side=LEFT, padx=(0, 5))
+        min_sep_var = tk.DoubleVar(value=5.0)
+        ttk.Spinbox(set_row, from_=0.5, to=60.0, increment=0.5, textvariable=min_sep_var, width=5).pack(side=LEFT, padx=(0, 20))
+
+        ttk.Label(set_row, text="Format:").pack(side=LEFT, padx=(0, 5))
+        fmt_var = tk.StringVar(value="PNG (Lossless)")
+        ttk.Combobox(
+            set_row, textvariable=fmt_var, values=["PNG (Lossless)", "JPEG (High Quality)", "WEBP"],
+            state="readonly", width=18,
+        ).pack(side=LEFT, padx=(0, 25))
+
+        prog_frame = ttk.Frame(content)
+        prog_bar = ttk.Progressbar(prog_frame, mode="determinate", bootstyle="info-striped")
+        prog_bar.pack(fill=X, pady=(5, 2))
+        prog_status = ttk.Label(prog_frame, text="", font=("Helvetica", 9), bootstyle="secondary")
+        prog_status.pack(anchor=W)
+
+        gallery_container = ttk.Frame(content)
+        gallery_container.pack(fill=BOTH, expand=True, pady=10)
+
+        def _start_analysis():
+            vpath = file_var.get().strip()
+            if not vpath or not os.path.isfile(vpath):
+                messagebox.showwarning("Missing File", "Please select a valid video file.")
+                return
+
+            analyze_btn.configure(state="disabled", text="Analyzing…")
+            prog_frame.pack(fill=X, pady=(0, 10), before=gallery_container)
+            prog_bar.configure(value=0)
+            prog_status.configure(text="Scanning frames…")
+
+            def _worker():
+                try:
+                    cands = analyze_interesting_frames(
+                        vpath,
+                        n_candidates=top_n_var.get(),
+                        min_separation=min_sep_var.get(),
+                        progress_callback=lambda msg, pct: dlg.after(
+                            0, lambda m=msg, p=pct: (prog_bar.configure(value=p), prog_status.configure(text=f"{m} ({p}%)")),
+                        ),
+                    )
+                    dlg.after(0, lambda: _on_complete(cands, vpath))
+                except Exception as e:
+                    dlg.after(0, lambda err=str(e): _on_err(err))
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _on_err(err):
+            prog_frame.pack_forget()
+            analyze_btn.configure(state="normal", text="✨ Analyze & Extract Images")
+            messagebox.showerror("Error", err)
+
+        def _on_complete(cands, vpath):
+            prog_frame.pack_forget()
+            analyze_btn.configure(state="normal", text="✨ Re-analyze Images")
+            base_name = os.path.splitext(os.path.basename(vpath))[0]
+            self._current_interesting_candidates = cands
+            self._render_interesting_images_gallery(gallery_container, cands, vpath, base_name)
+            dlg.update_idletasks()
+            if hasattr(content, "enable_scrolling"):
+                try:
+                    content.enable_scrolling()
+                except Exception:
+                    pass
+
+        analyze_btn = ttk.Button(
+            set_row, text="✨ Analyze & Extract Images", bootstyle="primary",
+            command=_start_analysis,
+        )
+        analyze_btn.pack(side=RIGHT)
 
     # ------------------------------------------------------------------
     # Video Player
@@ -2148,7 +3866,15 @@ class PipelineApp(ttk.Window):
         tab_yt = ttk.Frame(notebook, padding=10)
         notebook.add(tab_yt, text="YouTube Integration")
 
-        # Tab 4: Default Templates
+        # Tab 4: TikTok Integration
+        tab_tiktok = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_tiktok, text="TikTok Integration")
+
+        # Tab 5: Gemini
+        tab_gemini = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_gemini, text="Gemini")
+
+        # Tab 6: Default Templates
         tab_tpl_container = ttk.Frame(notebook, padding=10)
         notebook.add(tab_tpl_container, text="Default Templates")
         tab_tpl = ScrolledFrame(tab_tpl_container, autohide=True)
@@ -2164,6 +3890,21 @@ class PipelineApp(ttk.Window):
                    command=lambda: watch_var.set(filedialog.askdirectory(title="Select Watch Folder") or watch_var.get())
         ).pack(side=RIGHT)
 
+        # --- TAB 4: Gemini Settings ---
+        ttk.Label(tab_gemini, text="Gemini Integration Settings", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 10))
+
+        gemini_key_frame = ttk.Frame(tab_gemini)
+        gemini_key_frame.pack(fill=X, pady=8)
+        ttk.Label(gemini_key_frame, text="Gemini API Key:", width=18, anchor=W).pack(side=LEFT)
+        gemini_key_var = tk.StringVar(value=db.get_setting(self.conn, "gemini_api_key", ""))
+        ttk.Entry(gemini_key_frame, textvariable=gemini_key_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        gemini_model_frame = ttk.Frame(tab_gemini)
+        gemini_model_frame.pack(fill=X, pady=8)
+        ttk.Label(gemini_model_frame, text="Gemini Model:", width=18, anchor=W).pack(side=LEFT)
+        gemini_model_var = tk.StringVar(value=db.get_setting(self.conn, "gemini_model", "gemini-2.5-flash"))
+        ttk.Entry(gemini_model_frame, textvariable=gemini_model_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
         # --- TAB 2: Facebook Integration ---
         ttk.Label(tab_fb, text="Facebook Page Integration Settings", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 10))
 
@@ -2175,16 +3916,145 @@ class PipelineApp(ttk.Window):
 
         fb_tok_frame = ttk.Frame(tab_fb)
         fb_tok_frame.pack(fill=X, pady=5)
-        ttk.Label(fb_tok_frame, text="FB Access Token:", width=18, anchor=W).pack(side=LEFT)
+        ttk.Label(fb_tok_frame, text="FB Page Token:", width=18, anchor=W).pack(side=LEFT)
         fb_token_var = tk.StringVar(value=db.get_setting(self.conn, "fb_page_token", ""))
         ttk.Entry(fb_tok_frame, textvariable=fb_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
 
+        fb_long_user_tok_frame = ttk.Frame(tab_fb)
+        fb_long_user_tok_frame.pack(fill=X, pady=5)
+        ttk.Label(fb_long_user_tok_frame, text="FB Long User Token:", width=18, anchor=W).pack(side=LEFT)
+        fb_long_user_token_var = tk.StringVar(value=db.get_setting(self.conn, "fb_long_user_token", ""))
+        ttk.Entry(fb_long_user_tok_frame, textvariable=fb_long_user_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        # Exchange Section
+        ttk.Separator(tab_fb, orient="horizontal").pack(fill=X, pady=15)
+        ttk.Label(tab_fb, text="Exchange Short-Lived User Token for Long-Lived Token", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 10))
+
+        fb_appid_frame = ttk.Frame(tab_fb)
+        fb_appid_frame.pack(fill=X, pady=5)
+        ttk.Label(fb_appid_frame, text="FB App ID:", width=18, anchor=W).pack(side=LEFT)
+        fb_app_id_var = tk.StringVar(value=db.get_setting(self.conn, "fb_app_id", ""))
+        ttk.Entry(fb_appid_frame, textvariable=fb_app_id_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        fb_secret_frame = ttk.Frame(tab_fb)
+        fb_secret_frame.pack(fill=X, pady=5)
+        ttk.Label(fb_secret_frame, text="FB App Secret:", width=18, anchor=W).pack(side=LEFT)
+        fb_app_secret_var = tk.StringVar(value=db.get_setting(self.conn, "fb_app_secret", ""))
+        ttk.Entry(fb_secret_frame, textvariable=fb_app_secret_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        fb_short_tok_frame = ttk.Frame(tab_fb)
+        fb_short_tok_frame.pack(fill=X, pady=5)
+        ttk.Label(fb_short_tok_frame, text="Short-Lived Token:", width=18, anchor=W).pack(side=LEFT)
+        fb_short_token_var = tk.StringVar()
+        ttk.Entry(fb_short_tok_frame, textvariable=fb_short_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        def exchange_token_action():
+            app_id = fb_app_id_var.get().strip()
+            app_secret = fb_app_secret_var.get().strip()
+            short_token = fb_short_token_var.get().strip()
+            page_id = fb_page_id_var.get().strip()
+
+            if not app_id or not app_secret or not short_token:
+                messagebox.showwarning("Missing Fields", "Please enter App ID, App Secret, and Short-Lived Token.")
+                return
+
+            exchange_btn.configure(state="disabled", text="Exchanging...")
+
+            def _thread_exchange():
+                from pipeline.upload import exchange_facebook_token
+                long_user, page_token, err = exchange_facebook_token(app_id, app_secret, short_token, page_id)
+
+                def done():
+                    exchange_btn.configure(state="normal", text="Get Long-Lived Token")
+                    if err:
+                        messagebox.showerror("Exchange Failed", err)
+                    else:
+                        fb_long_user_token_var.set(long_user)
+                        if page_token:
+                            fb_token_var.set(page_token)
+                        messagebox.showinfo("Success", "Successfully exchanged and populated tokens!")
+
+                self.after(0, done)
+
+            threading.Thread(target=_thread_exchange, daemon=True).start()
+
+        def run_oauth_action():
+            app_id = fb_app_id_var.get().strip()
+            app_secret = fb_app_secret_var.get().strip()
+            page_id = fb_page_id_var.get().strip()
+
+            if not app_id or not app_secret:
+                messagebox.showwarning("Missing Fields", "Please enter App ID and App Secret first.")
+                return
+
+            login_btn.configure(state="disabled", text="Logging in...")
+
+            def _thread_login():
+                from pipeline.upload import run_facebook_oauth_flow
+                short_token, long_user, page_token, err = run_facebook_oauth_flow(app_id, app_secret, page_id)
+
+                def done():
+                    login_btn.configure(state="normal", text="Login with Facebook")
+                    if err:
+                        messagebox.showerror("Login Failed", err)
+                    else:
+                        fb_short_token_var.set(short_token)
+                        fb_long_user_token_var.set(long_user)
+                        if page_token:
+                            fb_token_var.set(page_token)
+                        messagebox.showinfo("Success", "Successfully logged in and retrieved tokens!")
+
+                self.after(0, done)
+
+            threading.Thread(target=_thread_login, daemon=True).start()
+
+        def get_page_token_action():
+            page_id = fb_page_id_var.get().strip()
+            user_token = fb_short_token_var.get().strip() or fb_long_user_token_var.get().strip() or fb_token_var.get().strip()
+
+            if not page_id or not user_token:
+                messagebox.showwarning("Missing Fields", "Please enter FB Page ID and either a Short-Lived Token, Long User Token, or Access Token.")
+                return
+
+            page_token_btn.configure(state="disabled", text="Fetching...")
+
+            def _thread_get_page_token():
+                from pipeline.upload import get_facebook_page_token
+                token, err = get_facebook_page_token(user_token, page_id)
+
+                def done():
+                    page_token_btn.configure(state="normal", text="Get Page Token")
+                    if err:
+                        messagebox.showerror("Failed to Get Page Token", err)
+                    else:
+                        fb_token_var.set(token)
+                        messagebox.showinfo("Success", "Successfully retrieved and populated Page Access Token!")
+
+                self.after(0, done)
+
+            threading.Thread(target=_thread_get_page_token, daemon=True).start()
+
+        exchange_btn_frame = ttk.Frame(tab_fb)
+        exchange_btn_frame.pack(fill=X, pady=10)
+        
+        page_token_btn = ttk.Button(exchange_btn_frame, text="Get Page Token", bootstyle="info-outline", command=get_page_token_action)
+        page_token_btn.pack(side=RIGHT, padx=5)
+
+        exchange_btn = ttk.Button(exchange_btn_frame, text="Get Long-Lived Token", bootstyle="primary-outline", command=exchange_token_action)
+        exchange_btn.pack(side=RIGHT, padx=5)
+
+        login_btn = ttk.Button(exchange_btn_frame, text="Login with Facebook", bootstyle="primary", command=run_oauth_action)
+        login_btn.pack(side=RIGHT, padx=5)
+
+
+
         fb_tip_lbl = ttk.Label(
             tab_fb,
-            text="💡 Tip: Use a permanent Page Access Token. Short-lived or temporary tokens expire in 1-2 hours.",
+            text="💡 Tip: Short-lived user tokens expire in ~2 hours. Exchanging them will retrieve a long-lived user token (valid for 60 days) or a never-expiring Page Access Token if a Page ID is specified.",
             font=("Helvetica", 8, "italic"),
             bootstyle="secondary",
-            justify=LEFT
+            justify=LEFT,
+            wraplength=650
         )
         fb_tip_lbl.pack(anchor=W, pady=(5, 10))
 
@@ -2283,7 +4153,145 @@ class PipelineApp(ttk.Window):
         auth_btn = ttk.Button(yt_auth_frame, text="Authorize YouTube", bootstyle="success", command=run_auth)
         auth_btn.pack(side=RIGHT)
 
-        # --- TAB 4: Default Templates ---
+        # --- TAB: TikTok Integration ---
+        ttk.Label(tab_tiktok, text="TikTok Content Posting API Settings", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 10))
+
+        tt_ck_frame = ttk.Frame(tab_tiktok)
+        tt_ck_frame.pack(fill=X, pady=5)
+        ttk.Label(tt_ck_frame, text="Client Key:", width=18, anchor=W).pack(side=LEFT)
+        tiktok_client_key_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_client_key", ""))
+        ttk.Entry(tt_ck_frame, textvariable=tiktok_client_key_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        tt_cs_frame = ttk.Frame(tab_tiktok)
+        tt_cs_frame.pack(fill=X, pady=5)
+        ttk.Label(tt_cs_frame, text="Client Secret:", width=18, anchor=W).pack(side=LEFT)
+        tiktok_client_secret_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_client_secret", ""))
+        ttk.Entry(tt_cs_frame, textvariable=tiktok_client_secret_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        tt_tok_frame = ttk.Frame(tab_tiktok)
+        tt_tok_frame.pack(fill=X, pady=5)
+        ttk.Label(tt_tok_frame, text="Access Token:", width=18, anchor=W).pack(side=LEFT)
+        tiktok_token_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_access_token", ""))
+        ttk.Entry(tt_tok_frame, textvariable=tiktok_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        tt_ref_frame = ttk.Frame(tab_tiktok)
+        tt_ref_frame.pack(fill=X, pady=5)
+        ttk.Label(tt_ref_frame, text="Refresh Token:", width=18, anchor=W).pack(side=LEFT)
+        tiktok_refresh_token_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_refresh_token", ""))
+        ttk.Entry(tt_ref_frame, textvariable=tiktok_refresh_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        tt_oid_frame = ttk.Frame(tab_tiktok)
+        tt_oid_frame.pack(fill=X, pady=5)
+        ttk.Label(tt_oid_frame, text="Open ID / Account:", width=18, anchor=W).pack(side=LEFT)
+        tiktok_open_id_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_open_id", ""))
+        ttk.Entry(tt_oid_frame, textvariable=tiktok_open_id_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        tt_uri_frame = ttk.Frame(tab_tiktok)
+        tt_uri_frame.pack(fill=X, pady=5)
+        ttk.Label(tt_uri_frame, text="Redirect URI (ngrok):", width=18, anchor=W).pack(side=LEFT)
+        tiktok_redirect_uri_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_redirect_uri", "http://localhost:8989/"))
+        ttk.Entry(tt_uri_frame, textvariable=tiktok_redirect_uri_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        tt_auth_frame = ttk.Frame(tab_tiktok)
+        tt_auth_frame.pack(fill=X, pady=15)
+        ttk.Label(tt_auth_frame, text="Authorization Status:", width=18, anchor=W).pack(side=LEFT)
+
+        tiktok_auth_status_var = tk.StringVar()
+        def check_tiktok_status():
+            from pipeline.upload import get_tiktok_client
+            creds, err = get_tiktok_client(self.conn)
+            if creds and (creds.get("access_token") or creds.get("refresh_token")):
+                tiktok_auth_status_var.set("Authorized ✅")
+            else:
+                tiktok_auth_status_var.set("Not Authorized ❌")
+
+        check_tiktok_status()
+
+        tt_status_lbl = ttk.Label(tt_auth_frame, textvariable=tiktok_auth_status_var, font=("Helvetica", 10, "bold"))
+        tt_status_lbl.pack(side=LEFT, padx=5)
+
+        def update_tt_status_style(*args):
+            val = tiktok_auth_status_var.get()
+            if "✅" in val:
+                tt_status_lbl.configure(bootstyle="success")
+            else:
+                tt_status_lbl.configure(bootstyle="danger")
+
+        tiktok_auth_status_var.trace_add("write", update_tt_status_style)
+        update_tt_status_style()
+
+        def run_tiktok_auth():
+            ck = tiktok_client_key_var.get().strip()
+            cs = tiktok_client_secret_var.get().strip()
+            if not ck or not cs:
+                messagebox.showwarning("Missing Fields", "Please enter TikTok Client Key and Client Secret first.")
+                return
+
+            tt_auth_btn.configure(state="disabled", text="Authorizing...")
+
+            def _thread_tt_auth():
+                from pipeline.upload import run_tiktok_oauth_flow
+                r_uri = tiktok_redirect_uri_var.get().strip()
+                success, msg = run_tiktok_oauth_flow(self.conn, ck, cs, redirect_uri=r_uri, log_callback=print)
+
+                def done():
+                    tt_auth_btn.configure(state="normal", text="Authorize TikTok")
+                    if success:
+                        messagebox.showinfo("Success", msg)
+                        tiktok_token_var.set(db.get_setting(self.conn, "tiktok_access_token", ""))
+                        tiktok_refresh_token_var.set(db.get_setting(self.conn, "tiktok_refresh_token", ""))
+                        tiktok_open_id_var.set(db.get_setting(self.conn, "tiktok_open_id", ""))
+                    else:
+                        messagebox.showerror("Failed", msg)
+                    check_tiktok_status()
+
+                self.after(0, done)
+
+            threading.Thread(target=_thread_tt_auth, daemon=True).start()
+
+        def run_tiktok_refresh():
+            ck = tiktok_client_key_var.get().strip()
+            cs = tiktok_client_secret_var.get().strip()
+            rt = tiktok_refresh_token_var.get().strip()
+            if not ck or not cs or not rt:
+                messagebox.showwarning("Missing Fields", "Please enter Client Key, Client Secret, and Refresh Token.")
+                return
+
+            tt_ref_btn.configure(state="disabled", text="Refreshing...")
+
+            def _thread_tt_ref():
+                from pipeline.upload import refresh_tiktok_token
+                new_tok, err = refresh_tiktok_token(self.conn, ck, cs, rt)
+
+                def done():
+                    tt_ref_btn.configure(state="normal", text="Refresh Token")
+                    if new_tok:
+                        tiktok_token_var.set(new_tok)
+                        messagebox.showinfo("Success", "TikTok Access Token successfully refreshed!")
+                    else:
+                        messagebox.showerror("Refresh Failed", err)
+                    check_tiktok_status()
+
+                self.after(0, done)
+
+            threading.Thread(target=_thread_tt_ref, daemon=True).start()
+
+        tt_ref_btn = ttk.Button(tt_auth_frame, text="Refresh Token", bootstyle="info-outline", command=run_tiktok_refresh)
+        tt_ref_btn.pack(side=RIGHT, padx=5)
+
+        tt_auth_btn = ttk.Button(tt_auth_frame, text="Authorize TikTok", bootstyle="success", command=run_tiktok_auth)
+        tt_auth_btn.pack(side=RIGHT, padx=5)
+
+        ttk.Label(
+            tab_tiktok,
+            text="💡 Tip: Create a Developer App on the TikTok for Developers portal and request 'video.upload' and 'video.publish' scopes for Content Posting API.",
+            font=("Helvetica", 8, "italic"),
+            bootstyle="secondary",
+            justify=LEFT,
+            wraplength=650
+        ).pack(anchor=W, pady=(5, 10))
+
+        # --- TAB: Default Templates ---
         # FB Template
         ttk.Label(tab_tpl, text="Default Facebook Post Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
         fb_tpl_txt = tk.Text(tab_tpl, height=3, wrap="word", bg="#2b2b3d", fg="#e0e0e0", insertbackground="#e0e0e0")
@@ -2312,16 +4320,59 @@ class PipelineApp(ttk.Window):
         short_desc_tpl_txt.pack(fill=X, pady=(0, 10))
         short_desc_tpl_txt.insert("1.0", db.get_setting(self.conn, "short_desc_template", "{{body}} #shorts"))
 
+        # TikTok Short Title
+        ttk.Label(tab_tpl, text="Default TikTok Title Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
+        tiktok_title_tpl_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_title_template", "{{title}} #shorts #fyp #foryou"))
+        ttk.Entry(tab_tpl, textvariable=tiktok_title_tpl_var).pack(fill=X, pady=(0, 10))
+
+        # TikTok Short Description / Caption
+        ttk.Label(tab_tpl, text="Default TikTok Caption / Description Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
+        tiktok_desc_tpl_txt = tk.Text(tab_tpl, height=3, wrap="word", bg="#2b2b3d", fg="#e0e0e0", insertbackground="#e0e0e0")
+        tiktok_desc_tpl_txt.pack(fill=X, pady=(0, 10))
+        tiktok_desc_tpl_txt.insert("1.0", db.get_setting(self.conn, "tiktok_desc_template", "{{body}}\n\n#music #sleep #relaxing #fyp #foryou"))
+
+        # YT Short Comment
+        ttk.Label(tab_tpl, text="Default YouTube Short Comment Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
+        short_comment_tpl_var = tk.StringVar(value=db.get_setting(self.conn, "short_comment_template", "Watch the full-length 4K video here: {{youtube-url}} 💤✨"))
+        ttk.Entry(tab_tpl, textvariable=short_comment_tpl_var).pack(fill=X, pady=(0, 10))
+
+        # Default Tags
+        ttk.Label(tab_tpl, text="Default Tags (comma-separated):", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
+        default_tags_var = tk.StringVar(value=db.get_setting(self.conn, "default_tags", "relaxing, sleep, music, ambient, binaural"))
+        ttk.Entry(tab_tpl, textvariable=default_tags_var).pack(fill=X, pady=(0, 10))
+
+        # Gemini Quote Prompt
+        ttk.Label(tab_tpl, text="Gemini Quote Prompt Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
+        gemini_quote_tpl_txt = tk.Text(tab_tpl, height=3, wrap="word", bg="#2b2b3d", fg="#e0e0e0", insertbackground="#e0e0e0")
+        gemini_quote_tpl_txt.pack(fill=X, pady=(0, 10))
+        gemini_quote_tpl_txt.insert("1.0", db.get_setting(self.conn, "gemini_quote_template", 'Generate a two-sentence quote for this sleep song.  Keep it simple. Generate the quote for the song titled "{{title}}".'))
+
         def save():
             db.set_setting(self.conn, "watch_folder", watch_var.get().strip())
+            db.set_setting(self.conn, "gemini_api_key", gemini_key_var.get().strip())
+            db.set_setting(self.conn, "gemini_model", gemini_model_var.get().strip())
             db.set_setting(self.conn, "fb_page_id", fb_page_id_var.get().strip())
             db.set_setting(self.conn, "fb_page_token", fb_token_var.get().strip())
+            db.set_setting(self.conn, "fb_long_user_token", fb_long_user_token_var.get().strip())
+            db.set_setting(self.conn, "fb_app_id", fb_app_id_var.get().strip())
+            db.set_setting(self.conn, "fb_app_secret", fb_app_secret_var.get().strip())
             db.set_setting(self.conn, "yt_client_secrets", yt_secrets_var.get().strip())
+            db.set_setting(self.conn, "tiktok_client_key", tiktok_client_key_var.get().strip())
+            db.set_setting(self.conn, "tiktok_client_secret", tiktok_client_secret_var.get().strip())
+            db.set_setting(self.conn, "tiktok_access_token", tiktok_token_var.get().strip())
+            db.set_setting(self.conn, "tiktok_refresh_token", tiktok_refresh_token_var.get().strip())
+            db.set_setting(self.conn, "tiktok_open_id", tiktok_open_id_var.get().strip())
+            db.set_setting(self.conn, "tiktok_redirect_uri", tiktok_redirect_uri_var.get().strip())
             db.set_setting(self.conn, "fb_post_template", fb_tpl_txt.get("1.0", "end-1c").strip())
             db.set_setting(self.conn, "yt_title_template", yt_title_tpl_var.get().strip())
             db.set_setting(self.conn, "yt_desc_template", yt_desc_tpl_txt.get("1.0", "end-1c").strip())
             db.set_setting(self.conn, "short_title_template", short_title_tpl_var.get().strip())
             db.set_setting(self.conn, "short_desc_template", short_desc_tpl_txt.get("1.0", "end-1c").strip())
+            db.set_setting(self.conn, "tiktok_title_template", tiktok_title_tpl_var.get().strip())
+            db.set_setting(self.conn, "tiktok_desc_template", tiktok_desc_tpl_txt.get("1.0", "end-1c").strip())
+            db.set_setting(self.conn, "short_comment_template", short_comment_tpl_var.get().strip())
+            db.set_setting(self.conn, "default_tags", default_tags_var.get().strip())
+            db.set_setting(self.conn, "gemini_quote_template", gemini_quote_tpl_txt.get("1.0", "end-1c").strip())
             
             wf = watch_var.get().strip()
             self._watch_label.configure(text=f"📂 Watch: {wf or 'Not set'}")
@@ -2392,14 +4443,23 @@ class PipelineApp(ttk.Window):
 
     def _periodic_refresh(self):
         """Periodically refresh the project list for processing updates."""
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
         self._refresh_list()
         if self.selected_project_id:
             self._update_detail_dynamically(self.selected_project_id)
-        self.after(3000, self._periodic_refresh)
+        self.after(1000, self._periodic_refresh)
 
     def _update_detail_dynamically(self, project_id: int):
         if self.selected_project_id != project_id:
             return
+            
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
             
         project = db.get_project(self.conn, project_id)
         if not project:
@@ -2416,11 +4476,17 @@ class PipelineApp(ttk.Window):
         # Update logs dynamically
         self._update_log_viewer(project_id)
         
-        # Update progress bar if processing
-        if current_status == "processing":
+        # Update progress bar if processing or deploying
+        if current_status in ("processing", "deploying"):
             current = project.get("current_step", 0)
-            total = project.get("total_steps", 9)
+            total = project.get("total_steps", 13)
+            if current_status == "deploying":
+                total = 12
+            elif current_status == "processing":
+                total = 13
             pct = int(100 * current / max(total, 1))
+            if pct > 100:
+                pct = 100
             if hasattr(self, "_proc_status_label") and self._proc_status_label.winfo_exists():
                 self._proc_status_label.configure(text=f"Progress: Step {current}/{total}")
             if hasattr(self, "_proc_progress_bar") and self._proc_progress_bar.winfo_exists():
@@ -2433,14 +4499,16 @@ class PipelineApp(ttk.Window):
             return
             
         steps = db.get_steps(self.conn, project_id)
-        active_steps = [s for s in steps if s["status"] in ("done", "running", "error")]
+        active_steps = [s for s in steps if s["status"] in ("done", "running", "error") or (s.get("log_text") and s.get("log_text").strip())]
         
         log_lines = []
         for s in active_steps:
             log_lines.append(f"=== Step {s['step_num']}: {s['step_name']} ({s['status'].upper()}) ===")
             if s.get("log_text"):
                 log_lines.append(s["log_text"])
-            log_lines.append("")
+            else:
+                log_lines.append("[No log output yet]")
+            log_lines.append("\n" + "="*60 + "\n")
             
         new_text = "\n".join(log_lines)
         

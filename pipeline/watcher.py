@@ -114,11 +114,12 @@ class FolderWatcher:
     Runs the watchdog observer on a daemon thread.
     """
 
-    def __init__(self, conn, on_new_project=None):
-        self.conn = conn
+    def __init__(self, db_path: str, on_new_project=None):
+        self.db_path = db_path
+        self.conn = db.get_connection(db_path)
         self.on_new_project = on_new_project
         self._observer: Observer | None = None
-        self._handler = _NewFolderHandler(conn, on_new_project)
+        self._handler = _NewFolderHandler(self.conn, on_new_project)
 
     def start(self, watch_folder: str):
         """Start watching. Idempotent — stops any previous watcher first."""

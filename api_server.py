@@ -88,6 +88,7 @@ def upload_project():
         skip_shorts = int(request.form.get("skip_shorts", 0))
         process_facebook = int(request.form.get("process_facebook", 1))
         process_youtube = int(request.form.get("process_youtube", 1))
+        process_tiktok = int(request.form.get("process_tiktok", 0))
         negative_logo = int(request.form.get("negative_logo", 0))
         overlay_text = request.form.get("overlay_text", "")
         font_size = int(request.form.get("font_size", 90))
@@ -99,8 +100,11 @@ def upload_project():
         yt_description_body = request.form.get("yt_description_body", "")
         short_title_body = request.form.get("short_title_body", "")
         short_description_body = request.form.get("short_description_body", "")
+        tiktok_title_body = request.form.get("tiktok_title_body", "")
+        tiktok_description_body = request.form.get("tiktok_description_body", "")
         fb_schedule_time = request.form.get("fb_schedule_time", "")
         yt_schedule_time = request.form.get("yt_schedule_time", "")
+        tiktok_schedule_time = request.form.get("tiktok_schedule_time", "")
         
         # 4. Insert project
         pid = db.create_project(
@@ -115,7 +119,8 @@ def upload_project():
             skip_shorts=skip_shorts,
             process_facebook=process_facebook,
             process_youtube=process_youtube,
-            negative_logo=negative_logo
+            negative_logo=negative_logo,
+            process_tiktok=process_tiktok
         )
         
         # Update settings
@@ -130,8 +135,11 @@ def upload_project():
             yt_description_body=yt_description_body,
             short_title_body=short_title_body,
             short_description_body=short_description_body,
+            tiktok_title_body=tiktok_title_body,
+            tiktok_description_body=tiktok_description_body,
             fb_schedule_time=fb_schedule_time,
-            yt_schedule_time=yt_schedule_time
+            yt_schedule_time=yt_schedule_time,
+            tiktok_schedule_time=tiktok_schedule_time
         )
         
         # 5. Automatically Queue if requested
