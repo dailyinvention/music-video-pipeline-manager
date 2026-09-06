@@ -296,6 +296,8 @@ PRESETS = {
     "1440p": (2560, 1440),
     "1080p": (1920, 1080),
     "720p":  (1280, 720),
+    "1080x1920": (1080, 1920),
+    "720x1280":  (720, 1280),
 }
 
 
@@ -476,15 +478,34 @@ def center_crop(frame: np.ndarray, ratio_w: int, ratio_h: int) -> np.ndarray:
         return frame[y_off:y_off + new_h, :]
 
 
+def resolve_watermark_path(watermark_path: str) -> str:
+    """Resolve watermark image path across current dir, assets/, and project root."""
+    if not watermark_path or watermark_path.lower() in ("none", ""):
+        return ""
+    if os.path.exists(watermark_path):
+        return watermark_path
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(root, "assets", watermark_path),
+        os.path.join(root, watermark_path),
+        os.path.join(root, "assets", os.path.basename(watermark_path)),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return watermark_path
+
+
 def load_watermark_data(watermark_path: str, video_w: int, video_h: int, negative: bool = False) -> tuple | None:
     """
     Load a watermark PNG image, calculate coordinates, optionally invert colors,
     and return blending parameters (logo_bgr, logo_alpha, y1, y2, x1, x2).
     """
-    if not watermark_path or watermark_path.lower() in ("none", "") or not os.path.exists(watermark_path):
+    resolved = resolve_watermark_path(watermark_path)
+    if not resolved or not os.path.exists(resolved):
         return None
     try:
-        logo = cv2.imread(watermark_path, cv2.IMREAD_UNCHANGED)
+        logo = cv2.imread(resolved, cv2.IMREAD_UNCHANGED)
         if logo is not None and len(logo.shape) == 3 and logo.shape[2] == 4:
             # Resize logo to fit in bottom right corner (12% of video height)
             w_h = int(video_h * 0.12)
@@ -524,6 +545,252 @@ def apply_watermark(frame: np.ndarray, watermark_data: tuple | None) -> np.ndarr
 
 
 # ---------------------------------------------------------------------------
+# Audio-reactive drum bump helpers (Demucs + Madmom / Librosa)
+# ---------------------------------------------------------------------------
+
+def _separate_drums_demucs(
+    audio_path: str,
+    temp_dir: str,
+    demucs_model: str = "htdemucs",
+    bump_stem: str = "drums+bass"
+) -> str | None:
+    """
+    Separate rhythm stems from sound file using Demucs.
+    Supports bump_stem = 'drums', 'bass', 'drums+bass', or 'all'.
+    Returns the file path to the combined rhythm WAV file, or None if separation fails.
+    """
+    print(f"  Separating stems with Demucs ({demucs_model}, stem={bump_stem})...")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    cmd = [
+        sys.executable, "-m", "demucs.separate",
+        "-n", demucs_model,
+        "-o", temp_dir,
+        audio_path
+    ]
+    if bump_stem == "drums":
+        cmd.insert(4, "--two-stems=drums")
+    elif bump_stem == "bass":
+        cmd.insert(4, "--two-stems=bass")
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"  Warning: demucs module call returned code ({res.returncode}): {res.stderr[:200] if res.stderr else ''}")
+            cmd_direct = ["demucs", "-n", demucs_model, "-o", temp_dir, audio_path]
+            if bump_stem in ("drums", "bass"):
+                cmd_direct.insert(3, f"--two-stems={bump_stem}")
+            res_direct = subprocess.run(cmd_direct, capture_output=True, text=True)
+            if res_direct.returncode != 0:
+                print(f"  Error: Demucs direct execution failed: {res_direct.stderr[:200] if res_direct.stderr else ''}")
+                return None
+    except Exception as e:
+        print(f"  Error invoking Demucs: {e}")
+        return None
+
+    track_name = os.path.splitext(os.path.basename(audio_path))[0]
+    model_out_dir = os.path.join(temp_dir, demucs_model, track_name)
+    if not os.path.isdir(model_out_dir):
+        for root, dirs, _ in os.walk(temp_dir):
+            for d in dirs:
+                if d == track_name:
+                    model_out_dir = os.path.join(root, d)
+                    break
+
+    drums_file = os.path.join(model_out_dir, "drums.wav")
+    bass_file = os.path.join(model_out_dir, "bass.wav")
+    
+    if bump_stem == "drums" and os.path.isfile(drums_file):
+        return drums_file
+    if bump_stem == "bass" and os.path.isfile(bass_file):
+        return bass_file
+
+    # Combine drums + bass into a single rhythm track if available
+    if os.path.isfile(drums_file) and os.path.isfile(bass_file) and bump_stem in ("drums+bass", "all"):
+        try:
+            import wave
+            w_d = wave.open(drums_file, 'rb')
+            w_b = wave.open(bass_file, 'rb')
+            
+            nchannels = w_d.getnchannels()
+            sampwidth = w_d.getsampwidth()
+            framerate = w_d.getframerate()
+            nframes = min(w_d.getnframes(), w_b.getnframes())
+            
+            d_bytes = w_d.readframes(nframes)
+            b_bytes = w_b.readframes(nframes)
+            w_d.close()
+            w_b.close()
+            
+            dtype = np.int16 if sampwidth == 2 else np.float32
+            d_arr = np.frombuffer(d_bytes, dtype=dtype).astype(np.float32)
+            b_arr = np.frombuffer(b_bytes, dtype=dtype).astype(np.float32)
+            
+            mixed = (d_arr + b_arr) * 0.5
+            mixed_clipped = np.clip(
+                mixed,
+                np.iinfo(dtype).min if dtype == np.int16 else -1.0,
+                np.iinfo(dtype).max if dtype == np.int16 else 1.0
+            ).astype(dtype)
+            
+            combined_path = os.path.join(model_out_dir, "rhythm_combined.wav")
+            w_out = wave.open(combined_path, 'wb')
+            w_out.setnchannels(nchannels)
+            w_out.setsampwidth(sampwidth)
+            w_out.setframerate(framerate)
+            w_out.writeframes(mixed_clipped.tobytes())
+            w_out.close()
+            print(f"  Combined drums + bass stems for complete rhythm tracking: {combined_path}")
+            return combined_path
+        except Exception as e:
+            print(f"  Warning: stem combining encountered issue ({e}); using drums.wav.")
+            if os.path.isfile(drums_file):
+                return drums_file
+
+    if os.path.isfile(drums_file):
+        return drums_file
+    if os.path.isfile(bass_file):
+        return bass_file
+        
+    for root, _, files in os.walk(temp_dir):
+        for f in files:
+            if f.lower() in ("drums.wav", "bass.wav"):
+                return os.path.join(root, f)
+
+    print(f"  Warning: could not locate separated stem WAV files in {temp_dir}")
+    return None
+
+
+def _detect_drum_onsets_madmom(
+    drum_wav_path: str,
+    total_frames: int,
+    fps: float,
+    audio_offset: float = 0.0
+) -> np.ndarray:
+    """
+    Calculate drum onset activations for each video frame using madmom or librosa.
+    Maps exact frame timestamps in seconds (accounting for audio_offset) with
+    strict left=0, right=0 bounds to prevent time-stretching sync drift.
+    """
+    activations = np.zeros(total_frames, dtype=np.float32)
+    target_times = (np.arange(total_frames) / max(fps, 1.0)) - audio_offset
+    
+    try:
+        import madmom
+        print("  Analyzing rhythm with madmom (RNNOnsetProcessor)...")
+        proc = madmom.features.onsets.RNNOnsetProcessor()
+        madmom_act = proc(drum_wav_path)
+        act_fps = getattr(madmom_act, "fps", 100.0)
+        madmom_times = np.arange(len(madmom_act)) / act_fps
+        
+        activations = np.interp(target_times, madmom_times, madmom_act, left=0.0, right=0.0).astype(np.float32)
+    except ImportError:
+        print("  Notice: madmom package not found. Falling back to librosa onset strength...")
+        try:
+            import librosa
+            print("  Analyzing rhythm with librosa...")
+            y, sr = librosa.load(drum_wav_path, sr=None)
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+            hop_length = 512
+            librosa_times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr, hop_length=hop_length)
+            activations = np.interp(target_times, librosa_times, onset_env, left=0.0, right=0.0).astype(np.float32)
+        except Exception as e:
+            print(f"  Warning: librosa onset detection failed ({e}).")
+            return np.zeros(total_frames, dtype=np.float32)
+    except Exception as e:
+        print(f"  Warning: madmom onset detection failed ({e}). Falling back to librosa...")
+        try:
+            import librosa
+            print("  Analyzing rhythm with librosa...")
+            y, sr = librosa.load(drum_wav_path, sr=None)
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+            hop_length = 512
+            librosa_times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr, hop_length=hop_length)
+            activations = np.interp(target_times, librosa_times, onset_env, left=0.0, right=0.0).astype(np.float32)
+        except Exception as ex:
+            print(f"  Warning: librosa onset detection failed ({ex}).")
+            return np.zeros(total_frames, dtype=np.float32)
+
+    # Noise floor subtraction & normalization for sharp beat peaks
+    max_val = np.max(activations)
+    if max_val > 0:
+        activations = activations / max_val
+        activations = np.maximum(0.0, activations - 0.20)
+        max_after = np.max(activations)
+        if max_after > 0:
+            activations = activations / max_after
+            
+    return activations
+
+
+def _calculate_bump_scales(
+    activations: np.ndarray,
+    bump_strength: float = 0.15,
+    bump_decay: float = 0.10,
+    fps: float = 30.0
+) -> np.ndarray:
+    """
+    Convert raw onset activations [0..1] to frame-by-frame scale multipliers
+    with exponential decay.
+    """
+    num_frames = len(activations)
+    scales = np.ones(num_frames, dtype=np.float32)
+    decay_factor = np.exp(-1.0 / (max(fps, 1.0) * max(bump_decay, 0.01)))
+    
+    current_bump = 0.0
+    for i in range(num_frames):
+        act = activations[i]
+        current_bump = max(float(act) * bump_strength, current_bump * decay_factor)
+        scales[i] = 1.0 + current_bump
+        
+    return scales
+
+
+def _warp_frame_bump(frame: np.ndarray, scale: float) -> np.ndarray:
+    """
+    Warp frame by scaling/zooming in around center and restoring size.
+    """
+    if scale <= 1.001:
+        return frame
+    h, w = frame.shape[:2]
+    # Use float for precision during cropping, then cast
+    crop_h = max(2, int(round(h / scale)))
+    crop_w = max(2, int(round(w / scale)))
+    top = (h - crop_h) // 2
+    left = (w - crop_w) // 2
+    cropped = frame[top:top + crop_h, left:left + crop_w]
+    return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def apply_drum_bump(
+    input_video: str,
+    input_audio: str,
+    output_video: str,
+    bump_strength: float = 0.15,
+    bump_decay: float = 0.10,
+    audio_offset: float = 0.0,
+    bump_stem: str = "drums+bass",
+    demucs_model: str = "htdemucs",
+):
+    """
+    Standalone function: reads sound file & video file, separates drum/bass tracks
+    using Demucs, runs onset analysis, and warps/restores video to bump to drums.
+    """
+    process_video(
+        input_path=input_video,
+        output_path=output_video,
+        target_w=0,
+        target_h=0,
+        audio_bump=input_audio,
+        bump_strength=bump_strength,
+        bump_decay=bump_decay,
+        audio_offset=audio_offset,
+        bump_stem=bump_stem,
+        demucs_model=demucs_model,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main processing pipeline
 # ---------------------------------------------------------------------------
 
@@ -553,6 +820,12 @@ def process_video(
     tile_size: int | None = None,
     watermark: str = "music_to_sleep_to_profile.png",
     negative_logo: bool = False,
+    audio_bump: str = "",
+    bump_strength: float = 0.15,
+    bump_decay: float = 0.10,
+    audio_offset: float = 0.0,
+    bump_stem: str = "drums+bass",
+    demucs_model: str = "htdemucs",
 ):
     """
     Read input video, upscale and process each frame, write to temp file,
@@ -599,24 +872,133 @@ def process_video(
     else:
         out_w, out_h = target_w, target_h
 
-    do_sharpen = sharpen_strength > 0
+    do_sharpen = sharpen_strength > 0 and not (ai_upscale and sharpen_strength == 1.0)
     do_blur = blur_percent > 0
     do_orton = orton and blur_percent > 0
 
-    print(f"Input:  {src_w}x{src_h} @ {fps:.2f}fps, {total_frames} frames")
-    print(f"Output: {out_w}x{out_h}")
+    # Fast path for already 4K/high-res videos: bypass upscale and process via ffmpeg direct filter
+    is_already_4k = (src_w >= 3840 or src_h >= 2160)
+    use_fast_path = (
+        is_already_4k and
+        not frames_dir and
+        not frames_only and
+        crop_ratio is None and
+        blur_percent == 0 and
+        not orton and
+        not enhance_details and
+        not ai_restore and
+        not audio_bump
+    )
+    if use_fast_path:
+        cap.release()
+        print("\n  [Fast Path] Video is already 4K/high-res. Bypassing frame-by-frame upscaling.")
+        print(f"  Applying watermark overlay via ffmpeg direct filter...")
+        
+        w_h = int(src_h * 0.12)
+        w_h = w_h - (w_h % 2)
+        pad_x = int(src_w * 0.02)
+        pad_y = int(src_h * 0.02)
+        
+        import sys
+        if codec.lower() in ("h265", "hevc"):
+            vcodec = "hevc_videotoolbox" if sys.platform == "darwin" else "libx265"
+        else:
+            vcodec = "h264_videotoolbox" if sys.platform == "darwin" else "libx264"
+            
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+        ]
+        
+        # Check if watermark exists
+        has_watermark = False
+        resolved_wm = resolve_watermark_path(watermark)
+        if resolved_wm and resolved_wm.lower() not in ("none", "") and os.path.exists(resolved_wm):
+            has_watermark = True
+            cmd += ["-i", resolved_wm]
+            
+            watermark_filters = f"scale=-1:{w_h},format=rgba,colorchannelmixer=aa=0.4"
+            if negative_logo:
+                watermark_filters += ",negate=negate_alpha=0"
+                
+            fc = f"[1:v]{watermark_filters}[logo];[0:v][logo]overlay=main_w-overlay_w-{pad_x}:main_h-overlay_h-{pad_y}:format=auto[vout]"
+            cmd += ["-filter_complex", fc, "-map", "[vout]"]
+        else:
+            cmd += ["-map", "0:v:0"]
+            
+        cmd += [
+            "-map", "0:a:0?",        # Map audio if it exists
+            "-c:v", vcodec,
+        ]
+        
+        if "videotoolbox" in vcodec:
+            q_val = max(1, min(100, int(round(115 - 2.5 * crf))))
+            cmd += ["-q:v", str(q_val)]
+        else:
+            cmd += ["-crf", str(crf), "-preset", "slow"]
+            
+        cmd += [
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "320k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"ffmpeg stderr:\n{result.stderr}")
+            sys.exit(f"Error: ffmpeg fast-path watermark failed (exit code {result.returncode})")
+            
+        total_secs = int(time.time() - process_start)
+        h, rem = divmod(total_secs, 3600)
+        m, s = divmod(rem, 60)
+        elapsed_str = f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s"
+
+        in_mb  = os.path.getsize(input_path)  / (1024 * 1024)
+        out_mb = os.path.getsize(output_path) / (1024 * 1024)
+
+        print(f"\n{'='*50}")
+        print(f"  Output : {output_path} (Fast Path)")
+        print(f"  Size   : {out_mb:.1f} MB  (input was {in_mb:.1f} MB)")
+        print(f"  Frames : {total_frames}  ({fps:.2f} fps)")
+        print(f"  Time   : {elapsed_str}")
+        print(f"{'='*50}")
+        return
+
+    print(f"\nVideo info: {src_w}x{src_h} @ {fps:.2f} fps ({total_frames} frames)")
+    print(f"Output:     {out_w}x{out_h} ({codec.upper()}, CRF {crf})")
     if ai_upscale:
-        print(f"Upscale: AI ({ai_backend})")
+        print(f"Upscale:    AI ({ai_backend} / {ai_model} model)")
+    else:
+        print(f"Upscale:    Lanczos4")
     if ai_restore:
-        print(f"Restore: AI depixelate/sharpen ({ai_restore_model} model)")
+        print(f"Restore:    AI depixelate/sharpen ({ai_restore_model} model)")
     if do_sharpen:
-        print(f"Sharpen: strength={sharpen_strength}, radius={sharpen_radius}")
+        print(f"Sharpen:    strength={sharpen_strength}, radius={sharpen_radius}")
     if do_orton:
         print(f"Orton effect: blur={blur_percent:.0f}%, strength={orton_strength:.2f}")
     elif do_blur:
         print(f"Gaussian blur: {blur_percent:.0f}%")
     if enhance_details:
         print("Detail enhancement: enabled")
+
+    # ── Audio-reactive drum bump analysis (Demucs + Madmom) ───────────────
+    bump_scales = None
+    demucs_temp_dir = None
+    if audio_bump:
+        if not os.path.isfile(audio_bump):
+            sys.exit(f"Error: audio bump file not found: {audio_bump}")
+        demucs_temp_dir = output_path + ".demucs_temp"
+        drum_wav = _separate_drums_demucs(audio_bump, demucs_temp_dir, demucs_model, bump_stem)
+        analysis_target = drum_wav if drum_wav else audio_bump
+        if not drum_wav:
+            print("  Notice: Demucs unavailable/failed; analyzing full audio directly for beats...")
+            
+        activations = _detect_drum_onsets_madmom(analysis_target, total_frames, fps, audio_offset)
+        bump_scales = _calculate_bump_scales(activations, bump_strength, bump_decay, fps)
+        print(f"  Audio drum bump active: max bump={bump_strength*100:.1f}%, decay={bump_decay}s, "
+              f"offset={audio_offset:.2f}s, stem={bump_stem}")
 
     # ── Build AI upscaler (once, before the frame loop) ───────────────────
     ai_sr = None      # OpenCV DNN super-res object
@@ -777,6 +1159,10 @@ def process_video(
         if do_crop:
             frame = center_crop(frame, crop_ratio[0], crop_ratio[1])
 
+        # 6.5 Audio-reactive drum bump warping
+        if bump_scales is not None and frame_num < len(bump_scales):
+            frame = _warp_frame_bump(frame, bump_scales[frame_num])
+
         frame = apply_watermark(frame, watermark_data)
 
         if save_frames:
@@ -863,12 +1249,14 @@ def process_video(
 
     pix_fmt = "yuv420p"
 
+    audio_source = audio_bump if (audio_bump and os.path.isfile(audio_bump)) else input_path
+
     cmd = [
         "ffmpeg", "-y",
         "-i", temp_ext,           # processed video (no audio)
-        "-i", input_path,         # original (for audio)
+        "-i", audio_source,       # audio source (new sound file or original)
         "-map", "0:v:0",         # video from processed
-        "-map", "1:a:0?",        # audio from original (if exists)
+        "-map", "1:a:0?",        # audio from audio source (if exists)
         "-c:v", vcodec,
     ]
     if "videotoolbox" in vcodec:
@@ -891,8 +1279,13 @@ def process_video(
         print(f"ffmpeg stderr:\n{result.stderr}")
         sys.exit(f"Error: ffmpeg encoding failed (exit code {result.returncode})")
 
-    # Clean up temp file
+    # Clean up temp files & demucs workspace
     os.remove(temp_ext)
+    if demucs_temp_dir and os.path.isdir(demucs_temp_dir):
+        try:
+            shutil.rmtree(demucs_temp_dir)
+        except Exception:
+            pass
 
     total_secs = int(time.time() - process_start)
     h, rem = divmod(total_secs, 3600)
@@ -983,6 +1376,30 @@ def main():
     parser.add_argument(
         "--negative-logo", action="store_true",
         help="Invert the watermark logo colors (negative).",
+    )
+    parser.add_argument(
+        "--audio-bump", default="",
+        help="Path to sound file (MP3/WAV) to separate drums & drive audio-reactive video bumping.",
+    )
+    parser.add_argument(
+        "--bump-strength", type=float, default=0.15,
+        help="Max scale/zoom bump on heavy drum hits (default: 0.15 = 15%% zoom).",
+    )
+    parser.add_argument(
+        "--bump-decay", type=float, default=0.10,
+        help="Drum bump decay time in seconds (default: 0.10s).",
+    )
+    parser.add_argument(
+        "--audio-offset", type=float, default=0.0,
+        help="Start offset in seconds between sound file and video (e.g. 5.0 if audio starts 5s into video). Default: 0.0.",
+    )
+    parser.add_argument(
+        "--bump-stem", choices=["drums", "bass", "drums+bass", "all"], default="drums+bass",
+        help="Stem(s) to isolate with Demucs for beat bump analysis (default: 'drums+bass').",
+    )
+    parser.add_argument(
+        "--demucs-model", default="htdemucs",
+        help="Demucs model for stem separation (default: htdemucs).",
     )
     parser.add_argument(
         "--ai-upscale", action="store_true",
@@ -1363,6 +1780,12 @@ def main():
         tile_size=args.tile,
         watermark=args.watermark,
         negative_logo=args.negative_logo,
+        audio_bump=args.audio_bump,
+        bump_strength=args.bump_strength,
+        bump_decay=args.bump_decay,
+        audio_offset=args.audio_offset,
+        bump_stem=args.bump_stem,
+        demucs_model=args.demucs_model,
     )
 
 

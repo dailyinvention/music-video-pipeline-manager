@@ -265,7 +265,7 @@ def build_overlay_filter(
     overlay_filters = ",".join(overlay_chain)
     fc = (
         f"[1:v]{overlay_filters}[txt];"
-        f"[0:v][txt]overlay=0:0:format=auto[vout]"
+        f"[0:v][txt]overlay=0:0:format=auto:shortest=1[vout]"
     )
     return fc
 

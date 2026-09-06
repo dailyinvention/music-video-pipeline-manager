@@ -664,10 +664,22 @@ def create_fractal_video(
         print(f"  Preview mode: rendering first {render_dur:.1f}s only")
 
     # Load watermark if specified and exists
+    def _resolve_wm(wm_path: str) -> str:
+        if not wm_path or wm_path.lower() in ("none", ""):
+            return ""
+        if os.path.exists(wm_path):
+            return wm_path
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for c in (os.path.join(root, "assets", wm_path), os.path.join(root, wm_path), os.path.join(root, "assets", os.path.basename(wm_path))):
+            if os.path.exists(c):
+                return c
+        return wm_path
+
     watermark_data = None
-    if watermark and watermark.lower() not in ("none", "") and os.path.exists(watermark):
+    resolved_wm = _resolve_wm(watermark)
+    if resolved_wm and resolved_wm.lower() not in ("none", "") and os.path.exists(resolved_wm):
         try:
-            logo = cv2.imread(watermark, cv2.IMREAD_UNCHANGED)
+            logo = cv2.imread(resolved_wm, cv2.IMREAD_UNCHANGED)
             if logo is not None and len(logo.shape) == 3 and logo.shape[2] == 4:
                 # Resize logo to fit in bottom right corner (12% of video height)
                 w_h = int(height * 0.12)

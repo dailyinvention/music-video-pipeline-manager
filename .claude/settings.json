@@ -1,7 +1,25 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python video_mod.py --upscale-frames frames_4k/ -r 4k --ai-upscale)"
+      "Bash(python video_mod.py --upscale-frames frames_4k/ -r 4k --ai-upscale)",
+      "Read(//Users/stefan/**)",
+      "Read(//Users/stefan/Desktop/**)",
+      "Read(//Users/stefan/Downloads/**)",
+      "Bash(ls \"/Volumes/Music To Sleep To/Music To SLeep To Vol. 1/\" | grep -i \"celepha\")",
+      "Read(//Volumes/Music To Sleep To/Music To Sleep To Vol. 1/**)",
+      "Bash(metaflac --list \"/Volumes/Music To Sleep To/Music To SLeep To Vol. 1/Flight to Celephaïs.flac\")",
+      "Bash(metaflac --export-tags-to=- \"/Volumes/Music To Sleep To/Music To SLeep To Vol. 1/Flight to Celephaïs.flac\")",
+      "Read(//tmp/**)",
+      "Bash(metaflac --remove-all-tags \"/Volumes/Music To Sleep To/Music To SLeep To Vol. 1/Flight to Celephaïs - Fixed.flac\")",
+      "Bash(metaflac --import-tags-from=/tmp/celepha_tags.txt \"/Volumes/Music To Sleep To/Music To SLeep To Vol. 1/Flight to Celephaïs - Fixed.flac\")",
+      "Bash(metaflac --list --block-type=VORBIS_COMMENT \"/Volumes/Music To Sleep To/Music To SLeep To Vol. 1/Flight to Celephaïs - Fixed.flac\")",
+      "Bash(metaflac --export-tags-to=\"/Volumes/Music To Sleep To/Music To SLeep To Vol. 1/metadata_backup/Flight to Celephaïs - Fixed.tags\" \"/Volumes/Music To Sleep To/Music To SLeep To Vol. 1/Flight to Celephaïs - Fixed.flac\")",
+      "Bash(ls \"/Volumes/Music To Sleep To/\" 2>/dev/null && echo \"---\" && ls \"/Volumes/Music To Sleep To/Music To Sleep To Vol. 1/\" 2>/dev/null)",
+      "Read(//Volumes/Music To Sleep To/**)",
+      "Bash(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames,r_frame_rate,duration -of default=noprint_wrappers=1 \"/Volumes/Music To Sleep To/So Bright/So Bright 4K \\(Video\\).mp4\")",
+      "Bash(ffmpeg -sseof -1 -i \"/Volumes/Music To Sleep To/So Bright/So Bright 4K \\(Video\\).mp4\" -update 1 -q:v 1 \"/Volumes/Music To Sleep To/So Bright/So Bright - Last Frame.png\")",
+      "Bash(convert -list font)",
+      "Bash(magick -list font)"
     ]
   }
 }
