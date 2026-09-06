@@ -146,6 +146,14 @@ def init_db(db_path: str) -> sqlite3.Connection:
             conn.execute("ALTER TABLE projects ADD COLUMN spotify_candidates_json TEXT DEFAULT '[]'")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE projects ADD COLUMN pill_badge TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE projects ADD COLUMN font_style TEXT DEFAULT 'Serif'")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     return conn
 

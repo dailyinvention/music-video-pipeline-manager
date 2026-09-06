@@ -525,6 +525,9 @@ class PipelineWorker:
         fo_start = project.get("fade_out_start", 8.0)
         fo_end = project.get("fade_out_end", 10.0)
 
+        font_style = project.get("font_style", "Serif")
+        font_name = "Helvetica" if "sans" in str(font_style).lower() else "Baskerville"
+
         ok, log = _run_python_script("text_overlay", [
             "-i", cropped,
             "-o", output,
@@ -532,6 +535,7 @@ class PipelineWorker:
             "--fade-in", str(fi_start), str(fi_end),
             "--fade-out", str(fo_start), str(fo_end),
             "--fontsize", str(font_size),
+            "--font", font_name,
         ], log_callback)
         if not ok:
             raise RuntimeError(f"Text overlay failed: {log}")

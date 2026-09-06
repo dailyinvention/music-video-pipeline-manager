@@ -29,6 +29,7 @@ from pipeline.frame_extractor import (
     export_frame,
     batch_export_frames,
     extract_full_frame,
+    render_thumbnail_text_overlay,
 )
 
 from PIL import Image, ImageTk
@@ -670,6 +671,23 @@ class PipelineApp(ttk.Window):
             state="normal" if is_editable else "readonly",
         ).pack(side=LEFT, padx=(5, 15))
 
+        ttk.Label(params, text="Font:").pack(side=LEFT)
+        self._font_style_var = tk.StringVar(value=project.get("font_style") or "Serif")
+        self._font_style_cb = ttk.Combobox(
+            params,
+            textvariable=self._font_style_var,
+            values=["Serif", "Sans-Serif"],
+            state="readonly" if is_editable else "disabled",
+            width=11,
+        )
+        self._font_style_cb.pack(side=LEFT, padx=(5, 15))
+        def _on_tab2_font_changed(e=None):
+            val = self._font_style_var.get()
+            if hasattr(self, "_img_overlay_font_style_var"):
+                self._img_overlay_font_style_var.set(val)
+            self._save_project(pid)
+        self._font_style_cb.bind("<<ComboboxSelected>>", _on_tab2_font_changed)
+
         ttk.Label(params, text="Fade In:").pack(side=LEFT)
         self._fi_start_var = tk.DoubleVar(value=project.get("fade_in_start", 2.0))
         ttk.Spinbox(
@@ -759,6 +777,7 @@ class PipelineApp(ttk.Window):
         
         desc_body = project.get("description_body", "") or project.get("overlay_text", "")
         overlay_val = project.get("overlay_text", "")
+        pill_badge_val = project.get("pill_badge", "")
         
         main_yt_id = ""
         for s in db.get_steps(self.conn, pid):
@@ -770,37 +789,37 @@ class PipelineApp(ttk.Window):
         fb_body_val = project.get("fb_post_body", "") or ""
         if not fb_body_val:
             fb_template = db.get_setting(self.conn, "fb_post_template", "{{title}}\n\n{{body}}")
-            fb_body_val = render_template(fb_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+            fb_body_val = render_template(fb_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
             
         yt_title_val = project.get("yt_title_body", "") or ""
         if not yt_title_val:
             yt_title_template = db.get_setting(self.conn, "yt_title_template", "{{title}}")
-            yt_title_val = render_template(yt_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+            yt_title_val = render_template(yt_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
             
         yt_desc_val = project.get("yt_description_body", "") or ""
         if not yt_desc_val:
             yt_desc_template = db.get_setting(self.conn, "yt_desc_template", "{{body}}")
-            yt_desc_val = render_template(yt_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+            yt_desc_val = render_template(yt_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
             
         short_title_val = project.get("short_title_body", "") or ""
         if not short_title_val:
             short_title_template = db.get_setting(self.conn, "short_title_template", "{{title}} #shorts")
-            short_title_val = render_template(short_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+            short_title_val = render_template(short_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
             
         short_desc_val = project.get("short_description_body", "") or ""
         if not short_desc_val:
             short_desc_template = db.get_setting(self.conn, "short_desc_template", "Relaxing music to sooth the soul and help guide you to sleep.\n\nChannel:  @music_to_sleep_to  \nVisit here to view the full-length 4k Youtube video: {{youtube-url}}\n\n© {{year}} Music To Sleep To. All Rights Reserved.\nMade with the help of Suno.")
-            short_desc_val = render_template(short_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+            short_desc_val = render_template(short_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
 
         tiktok_title_val = project.get("tiktok_title_body", "") or ""
         if not tiktok_title_val:
             tiktok_title_template = db.get_setting(self.conn, "tiktok_title_template", "{{title}} #shorts #fyp #foryou")
-            tiktok_title_val = render_template(tiktok_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+            tiktok_title_val = render_template(tiktok_title_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
 
         tiktok_desc_val = project.get("tiktok_description_body", "") or ""
         if not tiktok_desc_val:
             tiktok_desc_template = db.get_setting(self.conn, "tiktok_desc_template", "{{body}}\n\n#music #sleep #relaxing #fyp #foryou")
-            tiktok_desc_val = render_template(tiktok_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val)
+            tiktok_desc_val = render_template(tiktok_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
 
         tags_val = project.get("tags", "") or ""
         if not tags_val:
@@ -836,14 +855,16 @@ class PipelineApp(ttk.Window):
                     break
             current_yt_url = f"https://www.youtube.com/watch?v={current_yt_id}" if current_yt_id else ""
             current_overlay = project.get("overlay_text", "")
+            current_badge_var = getattr(self, "_img_overlay_badge_var", None)
+            current_badge_val = (current_badge_var.get().strip() if current_badge_var else "") or project.get("pill_badge", "")
 
-            fb_v = render_template(fb_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
-            yt_t = render_template(yt_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
-            yt_d = render_template(yt_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
-            st_t = render_template(short_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
-            st_d = render_template(short_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
-            tt_t = render_template(tiktok_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
-            tt_d = render_template(tiktok_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay)
+            fb_v = render_template(fb_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
+            yt_t = render_template(yt_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
+            yt_d = render_template(yt_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
+            st_t = render_template(short_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
+            st_d = render_template(short_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
+            tt_t = render_template(tiktok_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
+            tt_d = render_template(tiktok_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
             
             self._fb_post_body_text.configure(state="normal")
             self._fb_post_body_text.delete("1.0", tk.END)
@@ -1838,8 +1859,10 @@ class PipelineApp(ttk.Window):
         short_schedule_time = self._get_schedule_time(self._short_date_entry, self._short_time_var)
         tiktok_schedule_time = self._get_schedule_time(self._tiktok_date_entry, self._tiktok_time_var) if hasattr(self, "_tiktok_date_entry") else ""
 
-        db.update_project(
-            self.conn, pid,
+        tags_val = self._tags_entry_var.get().strip() if hasattr(self, "_tags_entry_var") else ""
+        pill_badge_val = self._img_overlay_badge_var.get().strip() if hasattr(self, "_img_overlay_badge_var") else None
+
+        update_kwargs = dict(
             facebook_video=self._fb_video_var.get(),
             youtube_video=self._yt_video_var.get(),
             video_file=self._yt_video_var.get(),
@@ -1875,8 +1898,18 @@ class PipelineApp(ttk.Window):
             yt_schedule_time=yt_schedule_time,
             short_schedule_time=short_schedule_time,
             tiktok_schedule_time=tiktok_schedule_time,
-            tags=self._tags_entry_var.get().strip() if hasattr(self, "_tags_entry_var") else "",
+            tags=tags_val,
         )
+        if pill_badge_val is not None:
+            update_kwargs["pill_badge"] = pill_badge_val
+
+        font_style_val = self._font_style_var.get() if hasattr(self, "_font_style_var") else (
+            self._img_overlay_font_style_var.get() if hasattr(self, "_img_overlay_font_style_var") else None
+        )
+        if font_style_val:
+            update_kwargs["font_style"] = font_style_val
+
+        db.update_project(self.conn, pid, **update_kwargs)
         self._refresh_list()
 
     def _save_and_queue(self, pid: int):
@@ -2162,29 +2195,38 @@ Generate ONLY a comma-separated list of clean tags (no hashtags, just lowercase 
             try:
                 import requests
                 gemini_model = db.get_setting(self.conn, "gemini_model", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-                url = f"https://generativelanguage.googleapis.com/v1/models/{gemini_model}:generateContent?key={api_key}"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={api_key}"
                 headers = {"Content-Type": "application/json"}
                 prompt = f"""
 {rule_text}
 
-Additionally, select the best, most poetic part of that generated quote to be used as a short text overlay (max 100 characters, no hashtags).
+Additionally:
+1. Select the best, most poetic part of that generated quote to be used as a short text overlay (max 100 characters, no hashtags).
+2. Examine currently trending YouTube video descriptions for sleep/relaxation music of this style, and generate a short, high-CTR music pill badge for the thumbnail (3 to 6 words) describing the music style/frequency and its listening benefit (for example: "432Hz Deep Sleep & Relaxation").
 
-Please format your response as a raw JSON object with exactly two keys:
-"quote": "the full generated two-sentence quote"
-"short_text": "the best, most poetic part of the quote"
+Please format your response as a raw JSON object with these keys:
+"quote": "the full generated two-sentence quote",
+"short_text": "the best, most poetic part of the quote",
+"pill_badge": "the descriptive music pill badge (e.g. '432Hz Deep Sleep & Relaxation')"
 
 Do not include any other text, markdown formatting (like ```json), or explanations. Return only the raw JSON.
 """
                 payload = {
                     "contents": [{
                         "parts": [{"text": prompt}]
-                    }]
+                    }],
+                    "tools": [{"google_search": {}}]
                 }
                 import time
                 max_retries = 3
+                res = None
                 for attempt in range(max_retries):
                     try:
                         res = requests.post(url, headers=headers, json=payload, timeout=60)
+                        if res.status_code == 400 and "tools" in payload:
+                            # Fallback without search grounding if model/key does not support tools
+                            payload.pop("tools", None)
+                            continue
                         if res.status_code == 503 and attempt < max_retries - 1:
                             time.sleep(2 * (attempt + 1))
                             continue
@@ -2218,8 +2260,9 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                 data = json.loads(text_response)
                 quote_val = data.get("quote", "").strip()
                 short_text_val = data.get("short_text", "").strip()
+                pill_badge_val = data.get("pill_badge", "").strip()
 
-                def success(q, s):
+                def success(q, s, b):
                     # Update description body in UI
                     self._description_body_text.delete("1.0", tk.END)
                     self._description_body_text.insert("1.0", q)
@@ -2230,15 +2273,25 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                     self._text_widget.insert("1.0", s)
                     if self.selected_project_id != pid or self._current_detail_project_status not in ("staged", "error", "queued", "pending_deployment", "done"):
                         self._text_widget.configure(state="disabled")
+
+                    # Update Pill Badge if generated
+                    if b:
+                        try:
+                            self.conn.execute("UPDATE projects SET pill_badge = ? WHERE id = ?", (b, pid))
+                            self.conn.commit()
+                        except Exception:
+                            pass
+                        if hasattr(self, "_img_overlay_badge_var"):
+                            self._img_overlay_badge_var.set(b)
                     
                     # Run template updates to re-render facebook/youtube posts
                     if hasattr(self, "_re_render_all_templates_callback") and self._re_render_all_templates_callback:
                         self._re_render_all_templates_callback(show_info=False)
                     
                     self._save_project(pid)
-                    messagebox.showinfo("Success", "Gemini successfully generated the quote and short text!")
+                    messagebox.showinfo("Success", "Gemini successfully generated the quote, short text, and thumbnail badge!")
 
-                self.after(0, lambda: success(quote_val, short_text_val))
+                self.after(0, lambda: success(quote_val, short_text_val, pill_badge_val))
             except Exception as e:
                 err_msg = str(e)
                 if hasattr(e, "response") and e.response is not None:
@@ -2253,6 +2306,120 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                 def reset_btn():
                     if hasattr(self, "_gemini_quote_btn") and self._gemini_quote_btn:
                         self._gemini_quote_btn.configure(state="normal", text="✨ Gemini Quote")
+                self.after(0, reset_btn)
+
+        threading.Thread(target=thread_func, daemon=True).start()
+
+    def _generate_gemini_pill_badge(self, project: dict):
+        """Generates a contextual YouTube thumbnail audio/pill badge using Gemini."""
+        api_key = db.get_setting(self.conn, "gemini_api_key", "").strip()
+        if not api_key:
+            messagebox.showwarning("Missing API Key", "Please configure your Gemini API Key in Settings first.")
+            return
+
+        title = project.get("name", "Sleep Music")
+        quote = getattr(self, "_img_overlay_quote_var", tk.StringVar()).get().strip() or project.get("overlay_text", "")
+
+        if hasattr(self, "_gemini_badge_btn") and self._gemini_badge_btn:
+            self._gemini_badge_btn.configure(state="disabled", text="⚡ Generating...")
+
+        badge_template = db.get_setting(
+            self.conn, "gemini_badge_template",
+            'Generate a short, descriptive music pill badge (3 to 6 words) for the YouTube thumbnail of the song titled "{{title}}". Look at trending YouTube video descriptions for this style of music and use trending acoustic descriptors and listening benefits (for example, "432Hz Deep Sleep & Relaxation").'
+        )
+        prompt_instruction = badge_template.replace("{{title}}", title)
+
+        def thread_func():
+            try:
+                import requests
+                gemini_model = db.get_setting(self.conn, "gemini_model", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                prompt = f"""
+You are an expert music curator and YouTube thumbnail designer specializing in relaxation, sleep, meditation, and ambient music.
+
+Examine currently trending YouTube videos and descriptions for sleep, meditation, and ambient relaxation music relevant to "{title}".
+Look at what audio descriptors, tuning frequencies, and benefit keywords are driving high views and CTR in top-performing YouTube descriptions right now.
+
+{prompt_instruction}
+
+Track Title: "{title}"
+Music Mood / Context: "{quote or 'Ambient deep sleep music, calming relaxation, stress relief'}"
+
+Guidelines for the Pill Badge:
+1. Grounded in Trending YouTube Descriptions: Clearly describe the music's acoustic character, tuning frequency, or audio style (e.g., 432Hz, 528Hz, Delta Waves, Solfeggio, Ambient Piano, Soft Rain) combined with the musical benefit or mood (e.g., Deep Sleep & Relaxation, Stress Relief, Calming Night).
+2. Length: Short and punchy, 3 to 6 words (maximum 35 characters).
+3. Tone: High credibility, calming, and high CTR on YouTube feeds.
+4. Examples:
+   - "432Hz Deep Sleep & Relaxation"
+   - "528Hz Miracle Tone & Healing"
+   - "Delta Waves for Deep Sleep"
+   - "432Hz Calming Ambient Piano"
+   - "Theta Waves & Stress Relief"
+   - "432Hz Night Rain & Sleep"
+   - "Binaural Beats for Insomnia"
+
+Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do not include markdown, and do not provide explanations.
+"""
+                payload = {
+                    "contents": [{
+                        "parts": [{"text": prompt}]
+                    }],
+                    "tools": [{"google_search": {}}]
+                }
+                import time
+                max_retries = 3
+                res = None
+                for attempt in range(max_retries):
+                    try:
+                        res = requests.post(url, headers=headers, json=payload, timeout=40)
+                        if res.status_code == 400 and "tools" in payload:
+                            # Fallback without search grounding if model/key does not support tools
+                            payload.pop("tools", None)
+                            continue
+                        if res.status_code == 503 and attempt < max_retries - 1:
+                            time.sleep(2 * (attempt + 1))
+                            continue
+                        res.raise_for_status()
+                        break
+                    except requests.exceptions.RequestException as e:
+                        if attempt == max_retries - 1:
+                            raise e
+                        time.sleep(2 * (attempt + 1))
+
+                result = res.json()
+                if "candidates" not in result or not result["candidates"]:
+                    raise RuntimeError("No candidate returned from Gemini.")
+
+                candidate = result["candidates"][0]
+                badge_text = candidate["content"]["parts"][0]["text"].strip()
+                # Clean up any surrounding quotes or markdown
+                badge_text = badge_text.strip('"`\' \n')
+
+                def success(b_text):
+                    self._img_overlay_badge_var.set(b_text)
+                    pid = project.get("id")
+                    if pid:
+                        try:
+                            self.conn.execute("UPDATE projects SET pill_badge = ? WHERE id = ?", (b_text, pid))
+                            self.conn.commit()
+                            project["pill_badge"] = b_text
+                        except Exception:
+                            pass
+                    self._refresh_interesting_images_gallery()
+                    if hasattr(self, "_re_render_all_templates_callback") and self._re_render_all_templates_callback:
+                        self._re_render_all_templates_callback(show_info=False)
+
+                self.after(0, lambda: success(badge_text))
+            except Exception as e:
+                err_msg = str(e)
+                def failed(err):
+                    messagebox.showerror("Error", f"Failed to generate pill badge with Gemini:\n{err}")
+                self.after(0, lambda: failed(err_msg))
+            finally:
+                def reset_btn():
+                    if hasattr(self, "_gemini_badge_btn") and self._gemini_badge_btn:
+                        self._gemini_badge_btn.configure(state="normal", text="✨ AI Badge")
                 self.after(0, reset_btn)
 
         threading.Thread(target=thread_func, daemon=True).start()
@@ -2424,7 +2591,7 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                         fb_token = db.get_setting(conn, "fb_page_token", "").strip()
                         if not fb_token:
                             fb_token = db.get_setting(conn, "fb_long_user_token", "").strip()
-                        fb_desc = render_template(project.get("fb_post_body", ""), project.get("overlay_text", ""), name)
+                        fb_desc = render_template(project.get("fb_post_body", ""), project.get("overlay_text", ""), name, pill_badge=project.get("pill_badge", ""))
                         
                         fb_log_lines = []
                         def log_cb_fb(txt):
@@ -2484,8 +2651,8 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                             db.update_project(conn, pid, current_step=11)
                             notify(11, "running", "Uploading YouTube Video...")
                             
-                            yt_title = render_template(project.get("yt_title_body", ""), project.get("overlay_text", ""), name)
-                            yt_desc = render_template(project.get("yt_description_body", ""), project.get("overlay_text", ""), name)
+                            yt_title = render_template(project.get("yt_title_body", ""), project.get("overlay_text", ""), name, pill_badge=project.get("pill_badge", ""))
+                            yt_desc = render_template(project.get("yt_description_body", ""), project.get("overlay_text", ""), name, pill_badge=project.get("pill_badge", ""))
                             
                             is_both_yt = (
                                 (project.get("process_youtube", 1) and not project.get("skip_shorts", 0)) or
@@ -2569,8 +2736,8 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                             short_yt_url = f"https://www.youtube.com/watch?v={main_yt_id}" if main_yt_id else ""
                             short_overlay = project.get("overlay_text", "")
 
-                            short_title = render_template(project.get("short_title_body", ""), project.get("overlay_text", ""), name, yt_url=short_yt_url, overlay_text=short_overlay)
-                            short_desc = render_template(project.get("short_description_body", ""), project.get("overlay_text", ""), name, yt_url=short_yt_url, overlay_text=short_overlay)
+                            short_title = render_template(project.get("short_title_body", ""), project.get("overlay_text", ""), name, yt_url=short_yt_url, overlay_text=short_overlay, pill_badge=project.get("pill_badge", ""))
+                            short_desc = render_template(project.get("short_description_body", ""), project.get("overlay_text", ""), name, yt_url=short_yt_url, overlay_text=short_overlay, pill_badge=project.get("pill_badge", ""))
                             
                             short_log_lines = []
                             def log_cb_short(txt):
@@ -2638,8 +2805,8 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                             tt_yt_url = f"https://www.youtube.com/watch?v={main_yt_id}" if main_yt_id else ""
                             tt_overlay = project.get("overlay_text", "")
 
-                            tt_title = render_template(project.get("tiktok_title_body", ""), project.get("overlay_text", ""), name, yt_url=tt_yt_url, overlay_text=tt_overlay)
-                            tt_desc = render_template(project.get("tiktok_description_body", ""), project.get("overlay_text", ""), name, yt_url=tt_yt_url, overlay_text=tt_overlay)
+                            tt_title = render_template(project.get("tiktok_title_body", ""), project.get("overlay_text", ""), name, yt_url=tt_yt_url, overlay_text=tt_overlay, pill_badge=project.get("pill_badge", ""))
+                            tt_desc = render_template(project.get("tiktok_description_body", ""), project.get("overlay_text", ""), name, yt_url=tt_yt_url, overlay_text=tt_overlay, pill_badge=project.get("pill_badge", ""))
                             
                             tt_log_lines = []
                             def log_cb_tt(txt):
@@ -2991,6 +3158,9 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
             else:
                 self._img_browse_btn.configure(state="normal")
 
+        if hasattr(self, "_img_overlay_fields_frame"):
+            self._update_overlay_fields_ui(project)
+
     def _browse_img_source_file(self, project: dict):
         initialdir = project.get("folder_path", "")
         chosen = filedialog.askopenfilename(
@@ -3003,6 +3173,114 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
             self._img_custom_path_var.set(chosen)
             self._img_src_path_var.set(chosen)
             self._update_img_source_info(chosen)
+
+    def _get_current_thumbnail_overlay_config(self) -> dict | None:
+        """Constructs current overlay configuration dictionary if enabled."""
+        if not hasattr(self, "_img_overlay_enabled_var") or not self._img_overlay_enabled_var.get():
+            return None
+        src_type = getattr(self, "_img_source_type_var", None)
+        is_short = (src_type.get() == "yt_short") if src_type else False
+        font_pct = 100.0
+        if hasattr(self, "_img_overlay_font_pct_var"):
+            try:
+                font_pct = float(self._img_overlay_font_pct_var.get())
+            except (ValueError, TypeError):
+                font_pct = 100.0
+        return {
+            "enabled": True,
+            "type": "short" if is_short else "full",
+            "title": getattr(self, "_img_overlay_title_var", tk.StringVar()).get().strip(),
+            "series": getattr(self, "_img_overlay_series_var", tk.StringVar()).get().strip(),
+            "quote": getattr(self, "_img_overlay_quote_var", tk.StringVar()).get().strip(),
+            "badge": getattr(self, "_img_overlay_badge_var", tk.StringVar()).get().strip(),
+            "short_text": getattr(self, "_img_overlay_short_text_var", tk.StringVar()).get().strip(),
+            "font_scale_pct": font_pct,
+            "font_style": getattr(self, "_img_overlay_font_style_var", tk.StringVar(value="Serif")).get(),
+        }
+
+    def _reset_overlay_font_pct(self):
+        """Resets font size percentage back to 100%."""
+        if hasattr(self, "_img_overlay_font_pct_var"):
+            self._img_overlay_font_pct_var.set(100)
+            self._refresh_interesting_images_gallery()
+
+    def _update_overlay_fields_ui(self, project: dict):
+        """Builds input fields appropriate for the current source video type (16:9 Full vs 9:16 Short)."""
+        if not hasattr(self, "_img_overlay_fields_frame"):
+            return
+        for w in self._img_overlay_fields_frame.winfo_children():
+            w.destroy()
+
+        src_type = self._img_source_type_var.get() if hasattr(self, "_img_source_type_var") else "yt_long"
+        enabled = self._img_overlay_enabled_var.get() if hasattr(self, "_img_overlay_enabled_var") else True
+        state = "normal" if enabled else "disabled"
+
+        if src_type == "yt_short":
+            # 9:16 Short overlay text
+            row = ttk.Frame(self._img_overlay_fields_frame)
+            row.pack(fill=X, pady=2)
+
+            ttk.Label(row, text="Short Overlay Text:", width=18).pack(side=LEFT)
+            short_ent = ttk.Entry(row, textvariable=self._img_overlay_short_text_var, state=state)
+            short_ent.pack(side=LEFT, fill=X, expand=True, padx=(0, 10))
+            ttk.Label(row, text="(Included on every short image)", font=("Helvetica", 8), bootstyle="secondary").pack(side=RIGHT)
+        else:
+            # 16:9 Full video overlay typography (Title, Series, Quote, Badge)
+            row1 = ttk.Frame(self._img_overlay_fields_frame)
+            row1.pack(fill=X, pady=2)
+
+            ttk.Label(row1, text="Track Title:", width=12).pack(side=LEFT)
+            ttk.Entry(row1, textvariable=self._img_overlay_title_var, state=state).pack(side=LEFT, fill=X, expand=True, padx=(0, 15))
+
+            ttk.Label(row1, text="Series Name:", width=12).pack(side=LEFT)
+            ttk.Entry(row1, textvariable=self._img_overlay_series_var, state=state).pack(side=LEFT, fill=X, expand=True)
+
+            row2 = ttk.Frame(self._img_overlay_fields_frame)
+            row2.pack(fill=X, pady=2)
+
+            ttk.Label(row2, text="Bedtime Quote:", width=12).pack(side=LEFT)
+            ttk.Entry(row2, textvariable=self._img_overlay_quote_var, state=state).pack(side=LEFT, fill=X, expand=True, padx=(0, 15))
+
+            ttk.Label(row2, text="Pill Badge:", width=12).pack(side=LEFT)
+            ttk.Entry(row2, textvariable=self._img_overlay_badge_var, state=state).pack(side=LEFT, fill=X, expand=True, padx=(0, 6))
+
+            self._gemini_badge_btn = ttk.Button(
+                row2,
+                text="✨ AI Badge",
+                bootstyle="info-outline",
+                state=state,
+                command=lambda: self._generate_gemini_pill_badge(project),
+            )
+            self._gemini_badge_btn.pack(side=RIGHT)
+
+    def _on_img_overlay_toggled(self):
+        enabled = self._img_overlay_enabled_var.get()
+        state = "normal" if enabled else "disabled"
+        if hasattr(self, "_img_overlay_font_spin"):
+            self._img_overlay_font_spin.configure(state=state)
+        if hasattr(self, "_img_overlay_font_style_cb"):
+            self._img_overlay_font_style_cb.configure(state="readonly" if enabled else "disabled")
+        if hasattr(self, "_gemini_badge_btn") and self._gemini_badge_btn:
+            self._gemini_badge_btn.configure(state=state)
+        if hasattr(self, "_img_overlay_fields_frame"):
+            for child in self._img_overlay_fields_frame.winfo_children():
+                for w in child.winfo_children():
+                    if isinstance(w, (ttk.Entry, ttk.Combobox, ttk.Spinbox)):
+                        w.configure(state=state)
+        self._refresh_interesting_images_gallery()
+
+    def _refresh_interesting_images_gallery(self):
+        """Re-renders gallery cards with updated overlay text settings."""
+        if hasattr(self, "_current_interesting_candidates") and self._current_interesting_candidates:
+            video_path = getattr(self, "_last_img_video_path", self._img_src_path_var.get() if hasattr(self, "_img_src_path_var") else "")
+            project_name = getattr(self, "_last_img_project_name", "video")
+            if video_path and os.path.isfile(video_path):
+                self._render_interesting_images_gallery(
+                    self._img_gallery_container,
+                    self._current_interesting_candidates,
+                    video_path,
+                    project_name,
+                )
 
     def _build_interesting_images_tab(self, parent, project: dict):
         """Constructs the tab interface for identifying and exporting interesting images."""
@@ -3098,6 +3376,96 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
         )
         self._img_analyze_btn.pack(side=RIGHT)
 
+        # Row 4: Thumbnail Text Overlay Controls
+        self._img_overlay_lf = ttk.LabelFrame(ctrl_pad, text="Thumbnail Text Overlay (16:9 Full Video & 9:16 Short)")
+        self._img_overlay_lf.pack(fill=X, pady=(8, 0))
+
+        ov_pad = ttk.Frame(self._img_overlay_lf, padding=(10, 6, 10, 6))
+        ov_pad.pack(fill=X)
+
+        top_ov_row = ttk.Frame(ov_pad)
+        top_ov_row.pack(fill=X, pady=(0, 4))
+
+        self._img_overlay_enabled_var = tk.BooleanVar(value=True)
+        self._img_overlay_font_pct_var = tk.IntVar(value=100)
+        self._img_overlay_title_var = tk.StringVar(value=project.get("name") or project.get("title") or "")
+        self._img_overlay_series_var = tk.StringVar(value="Hypnosonica Presents: Music To Sleep To")
+        self._img_overlay_quote_var = tk.StringVar(value=project.get("overlay_text") or "")
+        self._img_overlay_badge_var = tk.StringVar(value=project.get("pill_badge") or "432Hz Deep Sleep & Relaxation")
+        self._img_overlay_short_text_var = tk.StringVar(value=project.get("overlay_text") or "")
+
+        ttk.Checkbutton(
+            top_ov_row,
+            text="Burn Thumbnail Text Overlay",
+            variable=self._img_overlay_enabled_var,
+            command=self._on_img_overlay_toggled,
+            bootstyle="round-toggle",
+        ).pack(side=LEFT)
+
+        # Font Scale Percentage Control
+        ttk.Label(top_ov_row, text="Font Size:", font=("Helvetica", 9)).pack(side=LEFT, padx=(18, 4))
+        self._img_overlay_font_spin = ttk.Spinbox(
+            top_ov_row,
+            from_=40, to=250, increment=5,
+            textvariable=self._img_overlay_font_pct_var,
+            width=5,
+            command=self._refresh_interesting_images_gallery,
+        )
+        self._img_overlay_font_spin.pack(side=LEFT)
+        self._img_overlay_font_spin.bind("<Return>", lambda e: self._refresh_interesting_images_gallery())
+        self._img_overlay_font_spin.bind("<FocusOut>", lambda e: self._refresh_interesting_images_gallery())
+        ttk.Label(top_ov_row, text="%", font=("Helvetica", 9)).pack(side=LEFT, padx=(2, 6))
+
+        ttk.Button(
+            top_ov_row,
+            text="Reset",
+            bootstyle="secondary-link",
+            command=self._reset_overlay_font_pct,
+        ).pack(side=LEFT, padx=(0, 10))
+
+        ttk.Label(top_ov_row, text="Font:", font=("Helvetica", 9)).pack(side=LEFT, padx=(4, 4))
+        self._img_overlay_font_style_var = tk.StringVar(value=project.get("font_style") or "Serif")
+        self._img_overlay_font_style_cb = ttk.Combobox(
+            top_ov_row,
+            textvariable=self._img_overlay_font_style_var,
+            values=["Serif", "Sans-Serif"],
+            state="readonly" if self._img_overlay_enabled_var.get() else "disabled",
+            width=10,
+        )
+        self._img_overlay_font_style_cb.pack(side=LEFT, padx=(0, 10))
+
+        def _on_img_overlay_font_changed(e=None):
+            val = self._img_overlay_font_style_var.get()
+            if hasattr(self, "_font_style_var"):
+                self._font_style_var.set(val)
+            pid = project.get("id")
+            if pid:
+                db.update_project(self.conn, pid, font_style=val)
+            self._refresh_interesting_images_gallery()
+
+        self._img_overlay_font_style_cb.bind("<<ComboboxSelected>>", _on_img_overlay_font_changed)
+
+        ttk.Label(
+            top_ov_row,
+            text="✨ 16:9 Left-Aligned or 9:16 Short",
+            font=("Helvetica", 9),
+            bootstyle="secondary",
+        ).pack(side=LEFT)
+
+        self._img_refresh_preview_btn = ttk.Button(
+            top_ov_row,
+            text="🔄 Refresh Gallery",
+            bootstyle="secondary-outline",
+            width=16,
+            command=self._refresh_interesting_images_gallery,
+        )
+        self._img_refresh_preview_btn.pack(side=RIGHT)
+
+        self._img_overlay_fields_frame = ttk.Frame(ov_pad)
+        self._img_overlay_fields_frame.pack(fill=X, pady=(4, 0))
+
+        self._update_overlay_fields_ui(project)
+
         # 2. Progress Container (initially hidden)
         self._img_prog_frame = ttk.Frame(parent)
         self._img_progress_bar = ttk.Progressbar(self._img_prog_frame, mode="determinate", bootstyle="info-striped")
@@ -3135,6 +3503,7 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
         n_top = self._img_top_n_var.get()
         min_sep = self._img_min_sep_var.get()
         project_name = project.get("name", "video")
+        overlay_cfg = self._get_current_thumbnail_overlay_config()
 
         # Disable button, show progress
         self._img_analyze_btn.configure(state="disabled", text="Analyzing Frames…")
@@ -3151,6 +3520,7 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
                     progress_callback=lambda msg, pct: self.after(
                         0, lambda m=msg, p=pct: self._update_img_progress(m, p),
                     ),
+                    overlay_config=overlay_cfg,
                 )
                 self.after(0, lambda: self._on_image_analysis_complete(candidates, video_path, project_name))
             except Exception as e:
@@ -3177,11 +3547,16 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
         if hasattr(self, "_img_analyze_btn") and self._img_analyze_btn.winfo_exists():
             self._img_analyze_btn.configure(state="normal", text="✨ Re-analyze Images")
 
+        self._last_img_video_path = video_path
+        self._last_img_project_name = project_name
         self._current_interesting_candidates = candidates
         self._render_interesting_images_gallery(self._img_gallery_container, candidates, video_path, project_name)
 
     def _render_interesting_images_gallery(self, container, candidates: list[dict], video_path: str, project_name: str):
         """Renders the top action toolbar and visual grid cards for extracted candidates."""
+        self._last_img_video_path = video_path
+        self._last_img_project_name = project_name
+
         for w in container.winfo_children():
             w.destroy()
 
@@ -3243,6 +3618,7 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
             cards_frame.columnconfigure(col_idx, weight=1, uniform="col")
 
         max_thumb_size = 220 if is_vertical else 280
+        overlay_cfg = self._get_current_thumbnail_overlay_config()
 
         for idx, cand in enumerate(candidates):
             row_idx = idx // cols
@@ -3286,8 +3662,11 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
             ).pack(side=RIGHT)
 
             # Thumbnail Image Preview (pre-extracted or on-demand)
-            thumb_key = f"{video_path}_{t_sec}_{rank}"
-            pil_thumb = cand.get("thumbnail_pil") or extract_thumbnail_image(video_path, t_sec, max_dim=max_thumb_size)
+            thumb_key = f"{video_path}_{t_sec}_{rank}_{bool(overlay_cfg)}"
+            pil_thumb = extract_thumbnail_image(video_path, t_sec, max_dim=max_thumb_size, overlay_config=overlay_cfg)
+            if pil_thumb is None:
+                pil_thumb = cand.get("thumbnail_pil")
+
             if pil_thumb:
                 tk_thumb = ImageTk.PhotoImage(pil_thumb)
                 self._interesting_img_thumbnails[thumb_key] = tk_thumb
@@ -3373,7 +3752,8 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
         if not file_path:
             return
 
-        ok = export_frame(video_path, candidate["timestamp_sec"], file_path, img_format=ext)
+        overlay_cfg = self._get_current_thumbnail_overlay_config()
+        ok = export_frame(video_path, candidate["timestamp_sec"], file_path, img_format=ext, overlay_config=overlay_cfg)
         if ok:
             messagebox.showinfo("Export Successful", f"Saved full-resolution image to:\n{file_path}")
         else:
@@ -3404,12 +3784,14 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
             return
 
         ext = self._get_export_format_ext()
+        overlay_cfg = self._get_current_thumbnail_overlay_config()
         saved = batch_export_frames(
             video_path,
             candidates,
             output_dir=export_dir,
             prefix=project_name,
             img_format=ext,
+            overlay_config=overlay_cfg,
         )
 
         if saved:
@@ -3431,6 +3813,11 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
 
         h, w = rgb.shape[:2]
 
+        overlay_cfg = self._get_current_thumbnail_overlay_config()
+        pil_orig = Image.fromarray(rgb)
+        if overlay_cfg and overlay_cfg.get("enabled"):
+            pil_orig = render_thumbnail_text_overlay(pil_orig, overlay_cfg)
+
         dlg = ttk.Toplevel(self)
         dlg.title(f"Frame Preview — {title_info}")
         dlg.geometry("1100x780")
@@ -3447,9 +3834,10 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
             bootstyle="inverse-dark",
         ).pack(side=LEFT)
 
+        overlay_tag = " (Overlay Applied)" if overlay_cfg and overlay_cfg.get("enabled") else ""
         ttk.Label(
             top_bar,
-            text=f"Original Resolution: {w} × {h} px",
+            text=f"Original Resolution: {w} × {h} px{overlay_tag}",
             font=("Helvetica", 10),
             bootstyle="secondary",
         ).pack(side=LEFT, padx=15)
@@ -3467,7 +3855,6 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
         canvas = tk.Canvas(dlg, bg="#0d0d1a", highlightthickness=0)
         canvas.pack(fill=BOTH, expand=True, padx=10, pady=(0, 10))
 
-        pil_orig = Image.fromarray(rgb)
         dlg._preview_photo = None  # prevent GC
 
         def _update_canvas_img(event=None):
@@ -4306,6 +4693,15 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
         ).pack(anchor=W, pady=(5, 10))
 
         # --- TAB: Default Templates ---
+        ttk.Label(
+            tab_tpl,
+            text="💡 Available Placeholders: {{title}}, {{body}}, {{quote}}, {{pill_badge}} (or {{badge}}), {{overlay_text}}, {{youtube-url}}, {{year}}, {{month}}, {{date}}",
+            font=("Helvetica", 8, "italic"),
+            bootstyle="secondary",
+            justify=LEFT,
+            wraplength=650
+        ).pack(anchor=W, pady=(0, 10))
+
         # FB Template
         ttk.Label(tab_tpl, text="Default Facebook Post Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
         fb_tpl_txt = tk.Text(tab_tpl, height=3, wrap="word", bg="#2b2b3d", fg="#e0e0e0", insertbackground="#e0e0e0")
@@ -4361,6 +4757,12 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
         gemini_quote_tpl_txt.pack(fill=X, pady=(0, 10))
         gemini_quote_tpl_txt.insert("1.0", db.get_setting(self.conn, "gemini_quote_template", 'Generate a two-sentence quote for this sleep song.  Keep it simple. Generate the quote for the song titled "{{title}}".'))
 
+        # Gemini Pill Badge Prompt
+        ttk.Label(tab_tpl, text="Gemini Pill Badge Prompt Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
+        gemini_badge_tpl_txt = tk.Text(tab_tpl, height=3, wrap="word", bg="#2b2b3d", fg="#e0e0e0", insertbackground="#e0e0e0")
+        gemini_badge_tpl_txt.pack(fill=X, pady=(0, 10))
+        gemini_badge_tpl_txt.insert("1.0", db.get_setting(self.conn, "gemini_badge_template", 'Generate a short, descriptive music pill badge (3 to 6 words) for the YouTube thumbnail of the song titled "{{title}}". Look at trending YouTube video descriptions for this style of music and use trending acoustic descriptors and listening benefits (for example, "432Hz Deep Sleep & Relaxation").'))
+
         def save():
             db.set_setting(self.conn, "watch_folder", watch_var.get().strip())
             db.set_setting(self.conn, "gemini_api_key", gemini_key_var.get().strip())
@@ -4388,6 +4790,7 @@ Do not include any other text, markdown formatting (like ```json), or explanatio
             db.set_setting(self.conn, "short_comment_template", short_comment_tpl_var.get().strip())
             db.set_setting(self.conn, "default_tags", default_tags_var.get().strip())
             db.set_setting(self.conn, "gemini_quote_template", gemini_quote_tpl_txt.get("1.0", "end-1c").strip())
+            db.set_setting(self.conn, "gemini_badge_template", gemini_badge_tpl_txt.get("1.0", "end-1c").strip())
             
             wf = watch_var.get().strip()
             self._watch_label.configure(text=f"📂 Watch: {wf or 'Not set'}")

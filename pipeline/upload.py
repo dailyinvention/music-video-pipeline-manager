@@ -51,10 +51,10 @@ def extract_quote(body_text: str) -> str:
     return quote.strip()
 
 
-def render_template(template_str: str, body_text: str, project_title: str, yt_url: str = "", overlay_text: str = "") -> str:
+def render_template(template_str: str, body_text: str, project_title: str, yt_url: str = "", overlay_text: str = "", pill_badge: str = "", **kwargs) -> str:
     """
     Renders template string replacing placeholders with context variables:
-    {{body}}, {{quote}}, {{title}}, {{youtube-url}}, {{youtube_url}}, {{overlay_text}}, {{year}}, {{month}}, {{day}}, {{date}}
+    {{body}}, {{quote}}, {{title}}, {{pill_badge}}, {{badge}}, {{youtube-url}}, {{youtube_url}}, {{overlay_text}}, {{year}}, {{month}}, {{day}}, {{date}}
     """
     now = datetime.datetime.now()
     clean_q = extract_quote(body_text)
@@ -64,6 +64,9 @@ def render_template(template_str: str, body_text: str, project_title: str, yt_ur
         "quote": clean_q or (body_text or ""),
         "title": project_title or "",
         "overlay_text": overlay_text or "",
+        "pill_badge": pill_badge or "",
+        "pill-badge": pill_badge or "",
+        "badge": pill_badge or "",
         "year": str(now.year),
         "month": now.strftime("%B"), # Month name (e.g. "May")
         "day": str(now.day),
@@ -882,7 +885,7 @@ def sync_facebook_post_with_youtube_url(conn, project_id: int, log_callback=None
         template = "{{title}}\n\n{{body}}\n\nWatch on YouTube: {{youtube-url}}"
 
     yt_url = f"https://www.youtube.com/watch?v={yt_vid_id}"
-    rendered_desc = render_template(template, project.get("fb_post_body") or "", project.get("name") or "")
+    rendered_desc = render_template(template, project.get("fb_post_body") or "", project.get("name") or "", pill_badge=project.get("pill_badge") or "")
     rendered_desc = rendered_desc.replace("{{youtube-url}}", yt_url)
     rendered_desc = rendered_desc.replace("{{overlay_text}}", project.get("overlay_text") or "")
     while rendered_desc.startswith('""'):
@@ -970,7 +973,7 @@ def sync_youtube_short_with_main_url(conn, project_id: int, log_callback=None) -
             )
 
         body_input = project.get("short_description_body") or template
-        rendered_desc = render_template(template, body_input, project.get("name") or "", yt_url=main_yt_url, overlay_text=project.get("overlay_text") or "")
+        rendered_desc = render_template(template, body_input, project.get("name") or "", yt_url=main_yt_url, overlay_text=project.get("overlay_text") or "", pill_badge=project.get("pill_badge") or "")
 
         if log_callback:
             log_callback(f"Syncing YouTube Short description with Main YouTube URL ({main_yt_url})...")
@@ -1066,7 +1069,7 @@ def post_youtube_short_comment(conn, project_id: int, log_callback=None) -> tupl
         if not tpl:
             tpl = "Watch the full-length 4K video here: {{youtube-url}} 💤✨"
 
-        comment_text = render_template(tpl, "", project.get("name") or "", yt_url=main_yt_url, overlay_text=project.get("overlay_text") or "")
+        comment_text = render_template(tpl, "", project.get("name") or "", yt_url=main_yt_url, overlay_text=project.get("overlay_text") or "", pill_badge=project.get("pill_badge") or "")
 
         if log_callback:
             log_callback(f"Posting comment on YouTube Short [{short_vid_id}]: '{comment_text}'...")

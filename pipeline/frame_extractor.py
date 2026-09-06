@@ -8,10 +8,11 @@ aesthetic, sharp, and diverse keyframes, and exports them in full resolution.
 from __future__ import annotations
 
 import os
+import re
 import math
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 
 def compute_frame_metrics(frame_bgr: np.ndarray) -> dict[str, float]:
@@ -133,6 +134,7 @@ def analyze_interesting_frames(
     max_similarity: float = 0.72,
     max_samples: int = 400,
     sample_interval: float | None = None,
+    overlay_config: dict | None = None,
     progress_callback=None,
 ) -> list[dict]:
     """
@@ -311,6 +313,8 @@ def analyze_interesting_frames(
             nw, nh = max(1, int(fw * scale)), max(1, int(fh * scale))
             small = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
             thumb_pil = Image.fromarray(small)
+            if overlay_config and overlay_config.get("enabled", False):
+                thumb_pil = render_thumbnail_text_overlay(thumb_pil, overlay_config)
 
         results.append({
             "rank": rank_idx + 1,
@@ -356,10 +360,472 @@ def extract_full_frame(video_path: str, timestamp_sec: float) -> np.ndarray | No
     return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
 
-def extract_thumbnail_image(video_path: str, timestamp_sec: float, max_dim: int = 360) -> Image.Image | None:
+# ---------------------------------------------------------------------------
+# Font & Typography Overlay Helpers
+# ---------------------------------------------------------------------------
+
+DEFAULT_SERIF_FONT = "Baskerville"
+DEFAULT_SANS_FONT = "Helvetica"
+
+
+def get_font_name_for_style(font_style: str = "") -> str:
+    """Returns Baskerville for Serif or Helvetica for Sans-Serif."""
+    if font_style and "sans" in str(font_style).lower():
+        return DEFAULT_SANS_FONT
+    return DEFAULT_SERIF_FONT
+
+
+def resolve_font_path(font_name: str = DEFAULT_SERIF_FONT) -> str:
+    """Finds font file on system or returns fallback."""
+    if os.path.isfile(font_name):
+        return font_name
+
+    search_dirs = [
+        "/System/Library/Fonts/Supplemental",
+        "/System/Library/Fonts",
+        "/Library/Fonts",
+        os.path.expanduser("~/Library/Fonts"),
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+    ]
+
+    for d in search_dirs:
+        if not os.path.isdir(d):
+            continue
+        for root, _, files in os.walk(d):
+            for f in files:
+                if not f.lower().endswith((".ttf", ".otf", ".ttc")):
+                    continue
+                stem = os.path.splitext(f)[0].lower()
+                if f.lower() == font_name.lower() or stem == font_name.lower():
+                    return os.path.join(root, f)
+                if font_name.lower() in stem:
+                    return os.path.join(root, f)
+
+    return font_name
+
+
+def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> str:
+    """Wrap text so each line fits within max_width pixels."""
+    paragraphs = text.split("\n")
+    wrapped_lines = []
+    for para in paragraphs:
+        words = para.split()
+        if not words:
+            wrapped_lines.append("")
+            continue
+        current_line = words[0]
+        for word in words[1:]:
+            test_line = current_line + " " + word
+            bbox = draw.textbbox((0, 0), test_line, font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                current_line = test_line
+            else:
+                wrapped_lines.append(current_line)
+                current_line = word
+        wrapped_lines.append(current_line)
+    return "\n".join(wrapped_lines)
+
+
+def render_full_video_thumbnail_overlay(
+    image: Image.Image,
+    title: str = "",
+    series: str = "Hypnosonica Presents: Music To Sleep To",
+    quote: str = "",
+    badge: str = "432Hz Deep Sleep & Relaxation",
+    font_name: str = DEFAULT_SERIF_FONT,
+    font_scale_pct: float = 100.0,
+) -> Image.Image:
+    """
+    Renders left-aligned, thumbnail-scaled presentation typography onto a 16:9 frame.
+    
+    Layout:
+      - Aligned LEFT with clean margin
+      - Scaled large so that it remains prominently legible when displayed as a small thumbnail
+      - Subtle dark gradient scrim and multi-pass drop shadow ensures ultra-high contrast on any video background
+      - font_scale_pct adjusts all typographic sizes by the given percentage (default 100.0)
+    
+      Line 1: Track Title (e.g. "Baku's Kindness")
+      Line 2: Series (e.g. "Hypnosonica Presents: Music To Sleep To")
+      Line 3: "[Bedtime Sleep Quote]"
+      Line 4: Audio Badge (e.g. "432Hz Deep Sleep & Relaxation")
+    """
+    canvas = image.convert("RGBA")
+    w, h = canvas.size
+
+    scale_factor = max(0.2, min(3.0, float(font_scale_pct) / 100.0))
+
+    # Font sizes relative to video height, balanced for clear legibility even at small thumbnail card sizes
+    # In 3840x2160 (4K): title ~190px, series ~100px, quote ~82px, badge ~74px
+    # In 1920x1080 (HD): title ~95px, series ~50px, quote ~41px, badge ~37px
+    title_size = max(14, int(round(h * 0.082 * scale_factor)))
+    series_size = max(11, int(round(h * 0.044 * scale_factor)))
+    quote_size = max(12, int(round(h * 0.052 * scale_factor)))
+    badge_size = max(11, int(round(h * 0.044 * scale_factor)))
+
+    font_path = resolve_font_path(font_name)
+    try:
+        t_font = ImageFont.truetype(font_path, title_size)
+    except Exception:
+        t_font = ImageFont.load_default()
+
+    try:
+        s_font = ImageFont.truetype(font_path, series_size)
+    except Exception:
+        s_font = ImageFont.load_default()
+
+    try:
+        q_font = ImageFont.truetype(font_path, quote_size)
+    except Exception:
+        q_font = ImageFont.load_default()
+
+    try:
+        b_font = ImageFont.truetype(font_path, badge_size)
+    except Exception:
+        b_font = ImageFont.load_default()
+
+    pad_x = max(18, int(w * 0.065))   # Left margin (~6.5% width)
+    max_text_width = int(w * 0.72)    # Reserve right 28% for clean visual breathing room
+
+    draw_meas = ImageDraw.Draw(canvas)
+
+    lines_to_render = []
+    badge_lines = []
+
+    if title.strip():
+        w_title = _wrap_text(title.strip(), t_font, max_text_width, draw_meas)
+        for l in w_title.split("\n"):
+            if l.strip():
+                bbox = draw_meas.textbbox((0, 0), l, font=t_font)
+                lh = bbox[3] - bbox[1]
+                lines_to_render.append(("title", l, t_font, lh, (255, 255, 255, 255)))
+
+    if series.strip():
+        w_series = _wrap_text(series.strip(), s_font, max_text_width, draw_meas)
+        for l in w_series.split("\n"):
+            if l.strip():
+                bbox = draw_meas.textbbox((0, 0), l, font=s_font)
+                lh = bbox[3] - bbox[1]
+                lines_to_render.append(("series", l, s_font, lh, (225, 235, 250, 240)))
+
+    if quote.strip():
+        q_clean = quote.strip()
+        formatted_q = f'"{q_clean}"' if not (q_clean.startswith('"') and q_clean.endswith('"')) else q_clean
+        w_quote = _wrap_text(formatted_q, q_font, max_text_width, draw_meas)
+        for l in w_quote.split("\n"):
+            if l.strip():
+                bbox = draw_meas.textbbox((0, 0), l, font=q_font)
+                lh = bbox[3] - bbox[1]
+                lines_to_render.append(("quote", l, q_font, lh, (245, 240, 225, 235)))
+
+    if badge.strip():
+        w_badge = _wrap_text(badge.strip(), b_font, max_text_width, draw_meas)
+        for l in w_badge.split("\n"):
+            if l.strip():
+                bbox = draw_meas.textbbox((0, 0), l, font=b_font)
+                lh = bbox[3] - bbox[1]
+                lw = bbox[2] - bbox[0]
+                badge_lines.append((l, b_font, lh, lw))
+
+    if not lines_to_render and not badge_lines:
+        return canvas.convert("RGB")
+
+    # Start ~8% from the top
+    start_y = max(18, int(h * 0.08))
+
+    # Add dark gradient scrim on the left side to guarantee contrast
+    scrim = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    scrim_draw = ImageDraw.Draw(scrim)
+    scrim_width = int(max_text_width + pad_x * 1.8)
+    for x in range(min(w, scrim_width)):
+        progress = x / scrim_width
+        alpha = int(160 * (1.0 - math.sin(progress * math.pi * 0.5)))
+        scrim_draw.line([(x, 0), (x, h)], fill=(0, 0, 0, max(0, min(255, alpha))))
+
+    canvas = Image.alpha_composite(canvas, scrim)
+
+    # Soft, diffuse drop shadow layer
+    shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    s_draw = ImageDraw.Draw(shadow_layer)
+
+    curr_y = start_y
+    for item_type, line_text, font, line_h, _ in lines_to_render:
+        s_off = max(3, int(line_h * 0.08))
+        s_draw.text((pad_x + s_off, curr_y + s_off), line_text, font=font, fill=(0, 0, 0, 240))
+        spacing = int(line_h * 0.25)
+        if item_type == "title":
+            spacing += int(title_size * 0.20)
+        elif item_type == "series":
+            spacing += int(series_size * 0.20)
+        elif item_type == "quote":
+            spacing += int(quote_size * 0.25)
+        curr_y += line_h + spacing
+
+    # Pill badge shadow
+    pill_padding_x = max(8, int(badge_size * 0.65))
+    pill_padding_y = max(4, int(badge_size * 0.32))
+
+    if badge_lines:
+        b_shadow_y = curr_y + int(badge_size * 0.25)
+        for _, _, b_lh, b_lw in badge_lines:
+            s_off = max(3, int(b_lh * 0.08))
+            pill_rect_s = [
+                pad_x + s_off,
+                b_shadow_y - pill_padding_y + s_off,
+                pad_x + b_lw + pill_padding_x * 2 + s_off,
+                b_shadow_y + b_lh + pill_padding_y + s_off,
+            ]
+            pill_r_s = (pill_rect_s[3] - pill_rect_s[1]) // 2
+            s_draw.rounded_rectangle(pill_rect_s, radius=pill_r_s, fill=(0, 0, 0, 200))
+            b_shadow_y += b_lh + pill_padding_y * 2 + int(badge_size * 0.20)
+
+    shadow_blurred = shadow_layer.filter(ImageFilter.GaussianBlur(radius=6))
+    canvas = Image.alpha_composite(canvas, shadow_blurred)
+
+    # Primary text with subtle stroke for crisp character separation
+    draw = ImageDraw.Draw(canvas)
+    curr_y = start_y
+    for item_type, line_text, font, line_h, text_color in lines_to_render:
+        f_size = getattr(font, "size", line_h)
+        st_w = max(1, int(f_size * 0.025))
+        draw.text(
+            (pad_x, curr_y), line_text, font=font, fill=text_color,
+            stroke_width=st_w, stroke_fill=(0, 0, 0, 170),
+        )
+
+        spacing = int(line_h * 0.25)
+        if item_type == "title":
+            spacing += int(title_size * 0.20)
+        elif item_type == "series":
+            spacing += int(series_size * 0.20)
+        elif item_type == "quote":
+            spacing += int(quote_size * 0.25)
+        curr_y += line_h + spacing
+
+    # Draw Pill Badge
+    if badge_lines:
+        b_y = curr_y + int(badge_size * 0.25)
+        border_w = max(1, int(badge_size * 0.04))
+        for b_text, font, b_lh, b_lw in badge_lines:
+            pill_rect = [
+                pad_x,
+                b_y - pill_padding_y,
+                pad_x + b_lw + pill_padding_x * 2,
+                b_y + b_lh + pill_padding_y,
+            ]
+            pill_radius = (pill_rect[3] - pill_rect[1]) // 2
+            draw.rounded_rectangle(
+                pill_rect,
+                radius=pill_radius,
+                fill=(15, 25, 45, 210),
+                outline=(120, 185, 255, 190),
+                width=border_w,
+            )
+            draw.text(
+                (pad_x + pill_padding_x, b_y),
+                b_text,
+                font=font,
+                fill=(235, 245, 255, 255),
+            )
+            b_y += b_lh + pill_padding_y * 2 + int(badge_size * 0.20)
+
+    return canvas.convert("RGB")
+
+
+def render_short_thumbnail_overlay(
+    image: Image.Image,
+    text: str,
+    font_name: str = DEFAULT_SERIF_FONT,
+    position: str = "center",
+    font_scale_pct: float = 100.0,
+) -> Image.Image:
+    """
+    Renders the Short overlay text onto every 9:16 frame.
+    
+    Auto-sizes and wraps text to fit comfortably in the vertical canvas
+    with a dark backing shadow / outline for 100% legibility on mobile cards.
+    font_scale_pct adjusts font size relative to default balanced scale (default 100.0).
+    """
+    if not text or not text.strip():
+        return image.convert("RGB")
+
+    canvas = image.convert("RGBA")
+    w, h = canvas.size
+
+    pad_x = int(w * 0.08)
+    pad_y = int(h * 0.12)
+    max_w = w - 2 * pad_x
+    max_h = int(h * 0.60)
+
+    font_path = resolve_font_path(font_name)
+    draw_meas = ImageDraw.Draw(canvas)
+
+    # Binary search optimal baseline font size
+    lo, hi = 18, max(24, int(w * 0.14))
+    best_font = None
+    best_wrapped = text.strip()
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        try:
+            f = ImageFont.truetype(font_path, mid)
+        except Exception:
+            f = ImageFont.load_default()
+        wrapped = _wrap_text(text.strip(), f, max_w, draw_meas)
+        bbox = draw_meas.multiline_textbbox((0, 0), wrapped, font=f, align="center")
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if tw <= max_w and th <= max_h:
+            best_font = f
+            best_wrapped = wrapped
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    if best_font is None:
+        try:
+            best_font = ImageFont.truetype(font_path, 28)
+        except Exception:
+            best_font = ImageFont.load_default()
+        best_wrapped = _wrap_text(text.strip(), best_font, max_w, draw_meas)
+
+    # Apply font percentage scaling if requested
+    scale_factor = max(0.2, min(3.0, float(font_scale_pct) / 100.0))
+    if abs(scale_factor - 1.0) > 0.01:
+        cur_size = getattr(best_font, "size", 28)
+        target_size = max(12, int(round(cur_size * scale_factor)))
+        try:
+            best_font = ImageFont.truetype(font_path, target_size)
+        except Exception:
+            pass
+        best_wrapped = _wrap_text(text.strip(), best_font, max_w, draw_meas)
+
+    bbox = draw_meas.multiline_textbbox((0, 0), best_wrapped, font=best_font, align="center")
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    x = (w - tw) // 2
+    if position == "top":
+        y = pad_y
+    elif position == "bottom":
+        y = h - pad_y - th
+    else:  # "center"
+        y = (h - th) // 2
+
+    # Scrim behind text for contrast
+    scrim = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    scrim_draw = ImageDraw.Draw(scrim)
+    scrim_pad_y = int(th * 0.35)
+    scrim_top = max(0, y - scrim_pad_y)
+    scrim_bot = min(h, y + th + scrim_pad_y)
+
+    for sy in range(scrim_top, scrim_bot):
+        rel = (sy - scrim_top) / max(1, (scrim_bot - scrim_top))
+        alpha = int(140 * math.sin(rel * math.pi))
+        scrim_draw.line([(0, sy), (w, sy)], fill=(0, 0, 0, alpha))
+
+    canvas = Image.alpha_composite(canvas, scrim)
+
+    # Soft, diffuse drop shadow layer
+    shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    s_draw = ImageDraw.Draw(shadow_layer)
+    f_size = getattr(best_font, "size", 40)
+    s_off = max(4, int(f_size * 0.05))
+    s_draw.multiline_text(
+        (x + s_off, y + s_off), best_wrapped, font=best_font,
+        fill=(0, 0, 0, 245), align="center",
+    )
+    blur_rad = max(4, int(f_size * 0.08))
+    shadow_blurred = shadow_layer.filter(ImageFilter.GaussianBlur(radius=blur_rad))
+    canvas = Image.alpha_composite(canvas, shadow_blurred)
+
+    # Main text with subtle stroke for crisp character separation
+    draw = ImageDraw.Draw(canvas)
+    st_w = max(1, int(f_size * 0.02))
+    draw.multiline_text(
+        (x, y), best_wrapped, font=best_font,
+        fill=(255, 255, 255, 255),
+        stroke_width=st_w,
+        stroke_fill=(0, 0, 0, 160),
+        align="center",
+    )
+
+    return canvas.convert("RGB")
+
+
+def render_thumbnail_text_overlay(
+    image: Image.Image,
+    overlay_config: dict | None = None,
+) -> Image.Image:
+    """
+    Applies the appropriate thumbnail text overlay according to overlay_config:
+    
+    overlay_config format:
+      {
+        "enabled": bool,
+        "type": "full" | "short",
+        # For full video (16:9):
+        "title": str,
+        "series": str,
+        "quote": str,
+        "badge": str,
+        # For short (9:16):
+        "short_text": str,
+        "font_name": str (optional),
+        "font_scale_pct": float (optional, default 100.0),
+      }
+    """
+    if not overlay_config or not overlay_config.get("enabled", False):
+        return image
+
+    w, h = image.size
+    overlay_type = overlay_config.get("type")
+    if not overlay_type:
+        overlay_type = "short" if h > w else "full"
+
+    font_style = overlay_config.get("font_style", "")
+    if font_style:
+        font_name = get_font_name_for_style(font_style)
+    else:
+        font_name = overlay_config.get("font_name", DEFAULT_SERIF_FONT)
+    try:
+        font_scale_pct = float(overlay_config.get("font_scale_pct", 100.0))
+    except (ValueError, TypeError):
+        font_scale_pct = 100.0
+
+    if overlay_type == "short":
+        short_text = overlay_config.get("short_text", "")
+        return render_short_thumbnail_overlay(
+            image, short_text, font_name=font_name, font_scale_pct=font_scale_pct
+        )
+    else:
+        title = overlay_config.get("title", "")
+        series = overlay_config.get("series", "Hypnosonica Presents: Music To Sleep To")
+        quote = overlay_config.get("quote", "")
+        badge = overlay_config.get("badge", "432Hz Deep Sleep & Relaxation")
+        return render_full_video_thumbnail_overlay(
+            image,
+            title=title,
+            series=series,
+            quote=quote,
+            badge=badge,
+            font_name=font_name,
+            font_scale_pct=font_scale_pct,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Frame Extraction & Export
+# ---------------------------------------------------------------------------
+
+def extract_thumbnail_image(
+    video_path: str,
+    timestamp_sec: float,
+    max_dim: int = 360,
+    overlay_config: dict | None = None,
+) -> Image.Image | None:
     """
     Extracts a frame and scales it to a PIL Image suitable for UI preview.
     Preserves aspect ratio (for both 16:9 widescreen and 9:16 vertical shorts).
+    Optionally burns the thumbnail text overlay onto the image.
     """
     rgb = extract_full_frame(video_path, timestamp_sec)
     if rgb is None:
@@ -372,8 +838,24 @@ def extract_thumbnail_image(video_path: str, timestamp_sec: float, max_dim: int 
         scale = max_dim / h
 
     nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
-    small = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
-    return Image.fromarray(small)
+
+    if overlay_config and overlay_config.get("enabled", False):
+        # Render typography on normalized high-resolution canvas first so title, quote, and badge scale smoothly
+        if max(w, h) > 1920:
+            scale_preview = 1920.0 / max(w, h)
+            preview_w = max(1, int(w * scale_preview))
+            preview_h = max(1, int(h * scale_preview))
+            high_res = Image.fromarray(cv2.resize(rgb, (preview_w, preview_h), interpolation=cv2.INTER_AREA))
+        else:
+            high_res = Image.fromarray(rgb)
+
+        rendered_high_res = render_thumbnail_text_overlay(high_res, overlay_config)
+        pil_img = rendered_high_res.resize((nw, nh), Image.Resampling.LANCZOS)
+    else:
+        small = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
+        pil_img = Image.fromarray(small)
+
+    return pil_img
 
 
 def export_frame(
@@ -382,9 +864,11 @@ def export_frame(
     output_path: str,
     img_format: str = "png",
     jpeg_quality: int = 95,
+    overlay_config: dict | None = None,
 ) -> bool:
     """
     Extracts the full-resolution frame at timestamp_sec and saves it to output_path.
+    Applies text overlay if overlay_config['enabled'] is True.
     Supported formats: 'png', 'jpg' / 'jpeg', 'webp'.
     """
     rgb = extract_full_frame(video_path, timestamp_sec)
@@ -393,6 +877,9 @@ def export_frame(
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     pil_img = Image.fromarray(rgb)
+
+    if overlay_config and overlay_config.get("enabled", False):
+        pil_img = render_thumbnail_text_overlay(pil_img, overlay_config)
 
     fmt = img_format.lower().replace(".", "")
     if fmt in ("jpg", "jpeg"):
@@ -412,10 +899,12 @@ def batch_export_frames(
     prefix: str = "frame",
     img_format: str = "png",
     jpeg_quality: int = 95,
+    overlay_config: dict | None = None,
     progress_callback=None,
 ) -> list[str]:
     """
     Exports all given candidates to output_dir with descriptive filenames.
+    Applies text overlay to every frame if overlay_config is provided.
     Returns list of saved file paths.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -450,6 +939,7 @@ def batch_export_frames(
             out_path,
             img_format=ext,
             jpeg_quality=jpeg_quality,
+            overlay_config=overlay_config,
         )
         if ok:
             saved_paths.append(out_path)
@@ -458,3 +948,4 @@ def batch_export_frames(
         progress_callback(f"Exported {len(saved_paths)} images.", 100)
 
     return saved_paths
+
