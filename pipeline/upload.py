@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Upload backend for Facebook Graph API and YouTube Data API v3.
 Implements resumable uploads for large video files and template parsing.
@@ -11,11 +12,14 @@ import requests
 from pathlib import Path
 
 # Google API libraries
-import google.oauth2.credentials
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload
-from google_auth_oauthlib.flow import InstalledAppFlow
+try:
+    import google.oauth2.credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaFileUpload
+    from google_auth_oauthlib.flow import InstalledAppFlow
+except ImportError:
+    pass
 
 from pipeline import db
 
@@ -347,7 +351,7 @@ def upload_to_facebook_page(
         return "", f"Video file not found: {video_path}"
         
     file_size = os.path.getsize(video_path)
-    base_url = f"https://graph.facebook.com/v19.0/{page_id}/videos"
+    base_url = f"https://graph.facebook.com/v26.0/{page_id}/videos"
     
     try:
         # Phase 1: Start Session
@@ -608,7 +612,7 @@ def get_last_facebook_scheduled_date(page_id: str, page_access_token: str) -> tu
     
     # 1. Query /{page_id}/videos
     try:
-        url = f"https://graph.facebook.com/v19.0/{page_id}/videos"
+        url = f"https://graph.facebook.com/v26.0/{page_id}/videos"
         params = {
             "access_token": page_access_token,
             "fields": "scheduled_publish_time,title",
@@ -631,7 +635,7 @@ def get_last_facebook_scheduled_date(page_id: str, page_access_token: str) -> tu
         
     # 2. Query /{page_id}/scheduled_posts
     try:
-        url = f"https://graph.facebook.com/v19.0/{page_id}/scheduled_posts"
+        url = f"https://graph.facebook.com/v26.0/{page_id}/scheduled_posts"
         params = {
             "access_token": page_access_token,
             "fields": "scheduled_publish_time,message",
@@ -671,7 +675,7 @@ def get_facebook_page_token(user_token: str, page_id: str) -> tuple[str, str]:
         return "", "User Access Token and Page ID are required."
 
     try:
-        page_url = f"https://graph.facebook.com/v19.0/{page_id}"
+        page_url = f"https://graph.facebook.com/v26.0/{page_id}"
         page_params = {
             "fields": "access_token",
             "access_token": user_token
@@ -706,7 +710,7 @@ def exchange_facebook_token(
 
     try:
         # Step 1: Exchange short-lived token for long-lived user token
-        url = "https://graph.facebook.com/v19.0/oauth/access_token"
+        url = "https://graph.facebook.com/v26.0/oauth/access_token"
         params = {
             "grant_type": "fb_exchange_token",
             "client_id": app_id,
@@ -789,7 +793,7 @@ def run_facebook_oauth_flow(
 
     scopes = "pages_show_list,business_management,pages_read_engagement,pages_manage_posts"
     login_url = (
-        f"https://www.facebook.com/v19.0/dialog/oauth"
+        f"https://www.facebook.com/v26.0/dialog/oauth"
         f"?client_id={app_id}"
         f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
         f"&scope={scopes}"
@@ -823,7 +827,7 @@ def run_facebook_oauth_flow(
         return "", "", "", "Authorization timed out or was cancelled by user."
 
     try:
-        token_url = "https://graph.facebook.com/v19.0/oauth/access_token"
+        token_url = "https://graph.facebook.com/v26.0/oauth/access_token"
         token_params = {
             "client_id": app_id,
             "redirect_uri": redirect_uri,
@@ -895,7 +899,7 @@ def sync_facebook_post_with_youtube_url(conn, project_id: int, log_callback=None
         log_callback(f"Syncing Facebook post description with YouTube URL ({yt_url})...")
 
     # 1. Update Video Object Description
-    url_vid = f"https://graph.facebook.com/v19.0/{fb_vid_id}"
+    url_vid = f"https://graph.facebook.com/v26.0/{fb_vid_id}"
     res_vid = requests.post(url_vid, data={"access_token": page_token, "description": rendered_desc}, timeout=30).json()
 
     # 2. Get Feed Post ID & Update Timeline Feed Post message
@@ -905,7 +909,7 @@ def sync_facebook_post_with_youtube_url(conn, project_id: int, log_callback=None
         post_id = get_resp.get("post_id")
         if post_id:
             full_post_id = f"{page_id}_{post_id}" if "_" not in str(post_id) and page_id else str(post_id)
-            url_post = f"https://graph.facebook.com/v19.0/{full_post_id}"
+            url_post = f"https://graph.facebook.com/v26.0/{full_post_id}"
             res_post = requests.post(url_post, data={"access_token": page_token, "message": rendered_desc}, timeout=30).json()
             if res_post.get("success", False) or "id" in res_post:
                 post_updated = True
@@ -1257,9 +1261,10 @@ def run_tiktok_oauth_flow(
     import hashlib
     import base64
 
-    # PKCE Generation
+    # PKCE Generation. TikTok requires code_challenge as a hex-encoded SHA256
+    # digest, not the standard base64url encoding used by most OAuth providers.
     code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("utf-8").rstrip("=")
-    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("utf-8")).digest()).decode("utf-8").rstrip("=")
+    code_challenge = hashlib.sha256(code_verifier.encode("utf-8")).hexdigest()
 
     scope = "user.info.basic,video.upload,video.publish"
     login_url = (
@@ -1578,3 +1583,1091 @@ def upload_to_tiktok(
     if log_callback:
         log_callback(f"TikTok upload complete (Publish ID: {publish_id}). Status is processing.")
     return publish_id, ""
+
+
+# ---------------------------------------------------------------------------
+# Zernio Integration (unified social API, used to Direct Post to TikTok
+# without needing this app's own TikTok developer client to pass TikTok's
+# "wide audience of creators" Content Posting API audit)
+# ---------------------------------------------------------------------------
+
+ZERNIO_API_BASE = "https://zernio.com/api/v1"
+
+
+def _zernio_headers(api_key: str) -> dict:
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+
+def get_zernio_client(conn) -> tuple[dict | None, str]:
+    """
+    Retrieve stored Zernio credentials (API key + connected TikTok account)
+    from the settings database. Returns (dict_of_creds, error_message).
+    """
+    api_key = db.get_setting(conn, "zernio_api_key", "").strip()
+    if not api_key:
+        return None, "Zernio is not configured. Please enter your Zernio API Key in Settings."
+
+    account_id = db.get_setting(conn, "zernio_tiktok_account_id", "").strip()
+    if not account_id:
+        return None, "Zernio TikTok account is not connected. Please connect it in Settings."
+
+    return {
+        "api_key": api_key,
+        "profile_id": db.get_setting(conn, "zernio_profile_id", "").strip(),
+        "account_id": account_id,
+        "username": db.get_setting(conn, "zernio_tiktok_username", "").strip(),
+    }, ""
+
+
+def get_zernio_default_profile_id(api_key: str) -> tuple[str, str]:
+    """Fetch the default (or first) Zernio profile id for this API key."""
+    try:
+        res = requests.get(f"{ZERNIO_API_BASE}/profiles", headers=_zernio_headers(api_key), timeout=20)
+        data = res.json()
+    except Exception as e:
+        return "", f"Failed to reach Zernio: {e}"
+
+    profiles = data.get("profiles") if isinstance(data, dict) else data
+    if not profiles:
+        return "", f"No Zernio profile found for this API key: {data}"
+
+    default_profile = next((p for p in profiles if p.get("isDefault") or p.get("default")), profiles[0])
+    profile_id = default_profile.get("_id") or default_profile.get("id") or ""
+    if not profile_id:
+        return "", f"Could not determine Zernio profile id from response: {data}"
+    return profile_id, ""
+
+
+def run_zernio_tiktok_connect(conn, api_key: str, port: int = 8990, log_callback=None) -> tuple[bool, str]:
+    """
+    Open the browser to Zernio's hosted TikTok OAuth flow, wait for the
+    redirect back to a local callback server, then read the newly connected
+    TikTok account from Zernio and persist its account id.
+    """
+    import http.server
+    import socketserver
+    import webbrowser
+    import threading
+
+    if not api_key:
+        return False, "Zernio API Key is required."
+
+    profile_id, err = get_zernio_default_profile_id(api_key)
+    if not profile_id:
+        return False, err
+
+    got_callback = []
+
+    class ConnectHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            got_callback.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<h1>TikTok Connected via Zernio!</h1><p>You can close this tab and return to the app.</p>")
+
+        def log_message(self, format, *args):
+            pass
+
+    httpd = None
+    try:
+        socketserver.TCPServer.allow_reuse_address = True
+        httpd = socketserver.TCPServer(("localhost", port), ConnectHandler)
+    except Exception as e:
+        return False, f"Failed to start local server on port {port}: {e}"
+
+    redirect_url = f"http://localhost:{port}/callback"
+    try:
+        res = requests.get(
+            f"{ZERNIO_API_BASE}/connect/tiktok",
+            headers=_zernio_headers(api_key),
+            params={"profileId": profile_id, "redirect_url": redirect_url},
+            timeout=20
+        )
+        conn_json = res.json()
+    except Exception as e:
+        httpd.server_close()
+        return False, f"Failed to start Zernio TikTok connection: {e}"
+
+    auth_url = conn_json.get("authUrl") or conn_json.get("url") or conn_json.get("connectUrl")
+    if not auth_url:
+        httpd.server_close()
+        return False, f"Zernio did not return a connection URL: {conn_json}"
+
+    if log_callback:
+        log_callback("Opening browser to connect TikTok via Zernio...")
+    webbrowser.open(auth_url)
+
+    def run_server():
+        try:
+            httpd.handle_request()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=run_server)
+    t.start()
+    t.join(timeout=180)
+    try:
+        httpd.server_close()
+    except Exception:
+        pass
+
+    if not got_callback:
+        return False, "Timed out waiting for the TikTok connection to complete in your browser."
+
+    # Fetch the newly connected TikTok account from Zernio
+    try:
+        acc_res = requests.get(
+            f"{ZERNIO_API_BASE}/accounts",
+            headers=_zernio_headers(api_key),
+            params={"profileId": profile_id},
+            timeout=20
+        )
+        acc_json = acc_res.json()
+    except Exception as e:
+        return False, f"Connected, but failed to fetch account list from Zernio: {e}"
+
+    accounts = acc_json.get("accounts") if isinstance(acc_json, dict) else acc_json
+    if not accounts:
+        return False, f"No accounts returned by Zernio after connecting: {acc_json}"
+
+    tiktok_accounts = [a for a in accounts if str(a.get("platform", "")).lower() == "tiktok"]
+    if not tiktok_accounts:
+        return False, f"TikTok account not found in Zernio's account list: {acc_json}"
+
+    account = tiktok_accounts[-1]
+    account_id = account.get("accountId") or account.get("_id") or account.get("id") or ""
+    username = account.get("username") or account.get("name") or ""
+
+    if not account_id:
+        return False, f"Could not determine account id from Zernio response: {account}"
+
+    if conn:
+        db.set_setting(conn, "zernio_api_key", api_key)
+        db.set_setting(conn, "zernio_profile_id", profile_id)
+        db.set_setting(conn, "zernio_tiktok_account_id", account_id)
+        db.set_setting(conn, "zernio_tiktok_username", username)
+
+    return True, f"TikTok connected via Zernio successfully!{f' (@{username})' if username else ''}"
+
+
+def upload_via_zernio_tiktok(
+    api_key: str,
+    account_id: str,
+    video_path: str,
+    caption: str = "",
+    schedule_time_iso: str = "",
+    privacy_level: str = "SELF_ONLY",
+    log_callback=None,
+) -> tuple[str, str]:
+    """
+    Upload and publish a video to TikTok through Zernio's unified posting API,
+    uploading the file directly to Zernio's own presign+upload endpoint.
+    Returns (post_id, error_message).
+    """
+    if not api_key:
+        return "", "Zernio API Key is required."
+    if not account_id:
+        return "", "Zernio TikTok account is not connected."
+    if not os.path.isfile(video_path):
+        return "", f"Video file not found: {video_path}"
+
+    if os.path.getsize(video_path) == 0:
+        return "", f"Video file is empty: {video_path}"
+
+    import tempfile
+    import subprocess
+    from pipeline import get_binary_path
+
+    # Always normalize to H.264/AAC/1080x1920/yuv420p -- never pass the
+    # source through untouched. This pipeline's own renders don't
+    # consistently produce the same codec (some steps re-encode with
+    # h264_videotoolbox/libx264, others stream-copy the source's original
+    # codec via "-c:v copy"), so a conditional "only transcode if
+    # non-standard" check here previously let some already-H.264 files skip
+    # normalization and upload whatever audio encoding that render happened
+    # to have -- which is why TikTok played some videos silently and others
+    # fine despite them looking identical locally.
+    actual_video_path = video_path
+    temp_transcoded = None
+    try:
+        ffprobe_bin = get_binary_path("ffprobe")
+        probe_cmd = [
+            ffprobe_bin, "-v", "error",
+            "-show_entries", "stream=codec_type,codec_name,width,height,pix_fmt",
+            "-of", "json", video_path
+        ]
+        probe_out = subprocess.check_output(probe_cmd, stderr=subprocess.DEVNULL)
+        probe_json = json.loads(probe_out)
+        streams = probe_json.get("streams", [])
+        v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        v_codec = v_stream.get("codec_name", "").lower()
+        v_w = int(v_stream.get("width", 0) or 0)
+        v_h = int(v_stream.get("height", 0) or 0)
+        v_pix = v_stream.get("pix_fmt", "").lower()
+
+        if log_callback:
+            log_callback(f"Optimizing video for TikTok ({v_codec} {v_w}x{v_h} {v_pix} -> H.264 1080x1920 yuv420p)...")
+
+        ffmpeg_bin = get_binary_path("ffmpeg")
+        temp_transcoded = os.path.join(tempfile.gettempdir(), f"tiktok_{int(time.time())}.mp4")
+        conv_cmd = [
+            ffmpeg_bin, "-y", "-i", video_path,
+            "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level", "4.0",
+            "-crf", "22", "-pix_fmt", "yuv420p", "-color_range", "tv",
+            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+        ]
+        conv_cmd += ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"] if has_audio else ["-an"]
+        conv_cmd += ["-movflags", "+faststart", temp_transcoded]
+        subprocess.run(conv_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if os.path.isfile(temp_transcoded):
+            actual_video_path = temp_transcoded
+    except Exception as probe_err:
+        if log_callback:
+            log_callback(f"Format check note: using source video ({probe_err})")
+
+    file_size = os.path.getsize(actual_video_path)
+
+    caption = (caption or "").strip()
+    if len(caption) > 2200:
+        caption = caption[:2197] + "..."
+
+    # TikTok strips any line that is completely empty, collapsing intentional
+    # blank-line spacing between paragraphs. Placing an invisible character
+    # (Braille Pattern Blank) on those lines keeps them from being empty, so
+    # TikTok preserves the line break.
+    caption = "\n".join(ln if ln.strip() else "⠀" for ln in caption.split("\n"))
+
+    headers = _zernio_headers(api_key)
+
+    # Parse the requested schedule time. A time already in the past (e.g. a
+    # stale value left over in the project from an earlier test) is treated
+    # as no schedule at all -- publish immediately instead of sending TikTok
+    # a bogus past "scheduledFor" date.
+    schedule_dt_utc = None
+    if schedule_time_iso:
+        try:
+            clean_iso = schedule_time_iso
+            if not clean_iso.endswith("Z") and "+" not in clean_iso and "-" not in clean_iso[10:]:
+                dt = datetime.datetime.fromisoformat(clean_iso)
+                local_tz = datetime.datetime.now().astimezone().tzinfo
+                parsed_dt_utc = dt.replace(tzinfo=local_tz).astimezone(datetime.timezone.utc)
+            else:
+                parsed_dt_utc = datetime.datetime.fromisoformat(clean_iso.replace("Z", "+00:00"))
+
+            if parsed_dt_utc > datetime.datetime.now(datetime.timezone.utc):
+                schedule_dt_utc = parsed_dt_utc
+            elif log_callback:
+                log_callback(f"Note: schedule time '{schedule_time_iso}' is in the past; publishing now instead.")
+        except Exception:
+            schedule_dt_utc = None
+
+    try:
+        if log_callback:
+            log_callback(f"Requesting Zernio upload URL ({file_size / (1024 * 1024):.1f} MB)...")
+        try:
+            presign_res = requests.post(
+                f"{ZERNIO_API_BASE}/media/presign",
+                headers=headers,
+                json={
+                    "filename": os.path.basename(actual_video_path),
+                    "contentType": "video/mp4",
+                    "size": file_size,
+                },
+                timeout=30,
+            )
+            presign_json = presign_res.json()
+        except Exception as e:
+            return "", f"Zernio presign request failed: {e}"
+
+        upload_url = presign_json.get("uploadUrl")
+        public_url = presign_json.get("publicUrl")
+        if not upload_url or not public_url:
+            return "", f"Zernio did not return an upload URL: {presign_json}"
+
+        if log_callback:
+            log_callback("Uploading video to Zernio...")
+
+        # The presigned upload URL is valid for an hour, so a few retries on
+        # transient network/TLS errors (e.g. SSLEOFError mid-transfer on a
+        # large file) are safe -- just re-read the file fresh each attempt.
+        max_attempts = 3
+        last_err = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with open(actual_video_path, "rb") as f:
+                    put_res = requests.put(upload_url, headers={"Content-Type": "video/mp4"}, data=f, timeout=600)
+                if put_res.status_code in (200, 201, 204):
+                    last_err = None
+                    break
+                last_err = f"HTTP {put_res.status_code}: {put_res.text}"
+            except Exception as e:
+                last_err = str(e)
+
+            if attempt < max_attempts:
+                if log_callback:
+                    log_callback(f"Upload to Zernio failed ({last_err}); retrying ({attempt}/{max_attempts - 1})...")
+                time.sleep(5 * attempt)
+
+        if last_err:
+            return "", f"Zernio media upload failed after {max_attempts} attempts: {last_err}"
+
+        post_payload = {
+            "content": caption,
+            "mediaItems": [{"url": public_url, "type": "video"}],
+            "platforms": [{"platform": "tiktok", "accountId": account_id}],
+            "tiktokSettings": {
+                "privacy_level": privacy_level or "SELF_ONLY",
+                "allow_comment": True,
+                "allow_duet": True,
+                "allow_stitch": True,
+                "content_preview_confirmed": True,
+                "express_consent_given": True,
+            },
+        }
+
+        if schedule_dt_utc:
+            post_payload["scheduledFor"] = schedule_dt_utc.isoformat().replace("+00:00", "Z")
+            post_payload["timezone"] = "UTC"
+        elif schedule_time_iso:
+            # Schedule time provided but couldn't be parsed; fall back to publishing now.
+            if log_callback:
+                log_callback(f"Warning: Could not parse schedule time '{schedule_time_iso}' for Zernio; publishing now.")
+            post_payload["publishNow"] = True
+        else:
+            post_payload["publishNow"] = True
+
+        if log_callback:
+            log_callback("Publishing TikTok post via Zernio...")
+        try:
+            post_res = requests.post(f"{ZERNIO_API_BASE}/posts", headers=headers, json=post_payload, timeout=60)
+            post_json = post_res.json()
+        except Exception as e:
+            return "", f"Zernio post creation failed: {e}"
+
+        post = post_json.get("post") if isinstance(post_json, dict) else None
+        if not post:
+            return "", f"Zernio did not return a created post: {post_json}"
+
+        post_id = post.get("_id") or post.get("id") or ""
+        status = post.get("status", "")
+
+        if status == "failed":
+            return "", f"Zernio reported the post failed: {post}"
+
+        if log_callback:
+            log_callback(f"Zernio post {status or 'submitted'} (ID: {post_id}).")
+
+        return post_id, ""
+    finally:
+        if temp_transcoded and os.path.isfile(temp_transcoded):
+            try:
+                os.remove(temp_transcoded)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Instagram Integration (Meta Graph API / Content Publishing API)
+# ---------------------------------------------------------------------------
+
+def run_instagram_oauth_flow(
+    conn,
+    app_id: str,
+    app_secret: str,
+    port: int = 5055,
+    redirect_uri: str = "",
+    log_callback=None
+) -> tuple[bool, str]:
+    """
+    Start a local HTTP server on port 5055 to handle Meta/Instagram OAuth redirect,
+    open browser for user authorization, exchange code for 60-day long-lived token,
+    automatically discover linked Instagram Business/Creator accounts, and persist
+    credentials directly into SQLite database settings.
+    """
+    import http.server
+    import socketserver
+    import urllib.parse
+    import webbrowser
+    import threading
+
+    if not app_id or not app_secret:
+        return False, "Meta App ID and App Secret are required."
+
+    auth_code = []
+    server_error = []
+
+    class InstagramOAuthHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            if "code" in params:
+                auth_code.append(params["code"][0])
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<h1>Instagram Authorization Successful!</h1><p>You can close this tab and return to Music Video Pipeline Manager.</p>")
+            elif "error" in params:
+                server_error.append(params.get("error_description", ["Unknown error"])[0])
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<h1>Instagram Authorization Failed!</h1><p>Check the app for details.</p>")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    if not redirect_uri:
+        if conn:
+            redirect_uri = db.get_setting(conn, "instagram_redirect_uri", "").strip()
+    if not redirect_uri:
+        redirect_uri = f"http://localhost:{port}/"
+
+    httpd = None
+    try:
+        socketserver.TCPServer.allow_reuse_address = True
+        httpd = socketserver.TCPServer(("localhost", port), InstagramOAuthHandler)
+    except Exception as e:
+        return False, f"Failed to start local server on port {port}: {e}"
+
+    scopes = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement,business_management"
+    login_url = (
+        f"https://www.facebook.com/v26.0/dialog/oauth"
+        f"?client_id={app_id}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        f"&scope={scopes}"
+        f"&response_type=code"
+    )
+
+    if log_callback:
+        log_callback("Opening browser for Instagram / Meta Authorization...")
+
+    webbrowser.open(login_url)
+
+    def run_server():
+        try:
+            httpd.handle_request()
+        except Exception as e:
+            server_error.append(str(e))
+
+    t = threading.Thread(target=run_server)
+    t.start()
+    t.join(timeout=120)
+
+    try:
+        httpd.server_close()
+    except Exception:
+        pass
+
+    if server_error:
+        return False, f"Instagram OAuth Error: {server_error[0]}"
+
+    if not auth_code:
+        return False, "Instagram authorization timed out or was cancelled by user."
+
+    try:
+        # 1. Exchange auth code for short-lived user token
+        token_url = "https://graph.facebook.com/v26.0/oauth/access_token"
+        token_params = {
+            "client_id": app_id,
+            "redirect_uri": redirect_uri,
+            "client_secret": app_secret,
+            "code": auth_code[0]
+        }
+        res = requests.get(token_url, params=token_params, timeout=30)
+        res_json = res.json()
+        if "error" in res_json:
+            return False, f"Token Exchange Error: {res_json['error'].get('message')}"
+
+        short_lived_token = res_json.get("access_token")
+        if not short_lived_token:
+            return False, "Meta did not return an access token."
+
+        # 2. Exchange short-lived token for 60-day long-lived token
+        exchange_params = {
+            "grant_type": "fb_exchange_token",
+            "client_id": app_id,
+            "client_secret": app_secret,
+            "fb_exchange_token": short_lived_token
+        }
+        res_ex = requests.get(token_url, params=exchange_params, timeout=30)
+        res_ex_json = res_ex.json()
+        long_lived_token = res_ex_json.get("access_token", short_lived_token)
+
+        # 3. Discover linked Instagram Business / Creator accounts
+        accounts_url = "https://graph.facebook.com/v26.0/me/accounts"
+        acc_params = {
+            "fields": "id,name,access_token,instagram_business_account{id,username,name}",
+            "access_token": long_lived_token
+        }
+        acc_res = requests.get(accounts_url, params=acc_params, timeout=30)
+        acc_json = acc_res.json()
+
+        found_ig_id = ""
+        found_ig_username = ""
+        page_token = ""
+
+        if "data" in acc_json and isinstance(acc_json["data"], list):
+            for page in acc_json["data"]:
+                ig_acc = page.get("instagram_business_account")
+                if ig_acc and ig_acc.get("id"):
+                    found_ig_id = ig_acc["id"]
+                    found_ig_username = ig_acc.get("username", "")
+                    page_token = page.get("access_token", "")
+                    break
+
+        # Persist credentials into database settings
+        effective_token = page_token or long_lived_token
+        if conn:
+            db.set_setting(conn, "instagram_app_id", app_id)
+            db.set_setting(conn, "instagram_app_secret", app_secret)
+            db.set_setting(conn, "instagram_redirect_uri", redirect_uri)
+            db.set_setting(conn, "instagram_access_token", effective_token)
+            if found_ig_id:
+                db.set_setting(conn, "instagram_account_id", found_ig_id)
+            if found_ig_username:
+                db.set_setting(conn, "instagram_username", found_ig_username)
+
+        if found_ig_id:
+            user_display = f"@{found_ig_username}" if found_ig_username else f"ID: {found_ig_id}"
+            return True, f"Successfully connected to Instagram Account {user_display}!"
+        else:
+            return True, "Authorized Meta account, but no linked Instagram Business/Creator account was found on your Facebook Pages. Please link your Instagram account to a Facebook Page in Meta Business Suite."
+    except Exception as e:
+        return False, f"Error completing Instagram authentication: {e}"
+
+
+def exchange_instagram_token(conn, app_id: str, app_secret: str, token_input: str) -> tuple[bool, str]:
+    """
+    Exchange a short-lived token or process a user token from Graph API Explorer,
+    upgrade it to a 60-day or permanent page-linked token, discover the linked
+    Instagram Business / Creator account, and persist into database settings.
+    """
+    if not token_input or not token_input.strip():
+        return False, "Token cannot be empty."
+
+    token_str = token_input.strip()
+    long_lived_token = token_str
+
+    # Attempt exchange for 60-day token if app_id & app_secret provided
+    if app_id and app_secret:
+        try:
+            token_url = "https://graph.facebook.com/v26.0/oauth/access_token"
+            exchange_params = {
+                "grant_type": "fb_exchange_token",
+                "client_id": app_id.strip(),
+                "client_secret": app_secret.strip(),
+                "fb_exchange_token": token_str
+            }
+            res_ex = requests.get(token_url, params=exchange_params, timeout=30)
+            res_ex_json = res_ex.json()
+            if "access_token" in res_ex_json:
+                long_lived_token = res_ex_json["access_token"]
+        except Exception:
+            pass
+
+    # Discover linked Instagram Business / Creator accounts from Pages
+    accounts_url = "https://graph.facebook.com/v26.0/me/accounts"
+    acc_params = {
+        "fields": "id,name,access_token,instagram_business_account{id,username,name}",
+        "access_token": long_lived_token
+    }
+    try:
+        acc_res = requests.get(accounts_url, params=acc_params, timeout=30)
+        acc_json = acc_res.json()
+        if "error" in acc_json:
+            return False, f"Meta API Error: {acc_json['error'].get('message')}"
+    except Exception as e:
+        return False, f"Failed to query connected accounts: {e}"
+
+    found_ig_id = ""
+    found_ig_username = ""
+    page_name = ""
+    page_token = ""
+
+    if "data" in acc_json and isinstance(acc_json["data"], list):
+        for page in acc_json["data"]:
+            ig_acc = page.get("instagram_business_account")
+            if ig_acc and ig_acc.get("id"):
+                found_ig_id = ig_acc["id"]
+                found_ig_username = ig_acc.get("username", "")
+                page_name = page.get("name", "")
+                page_token = page.get("access_token", "")
+                break
+
+    effective_token = page_token or long_lived_token
+    if conn:
+        db.set_setting(conn, "instagram_access_token", effective_token)
+        if found_ig_id:
+            db.set_setting(conn, "instagram_account_id", found_ig_id)
+        if found_ig_username:
+            db.set_setting(conn, "instagram_username", found_ig_username)
+
+    if found_ig_id:
+        return True, f"Successfully connected to Instagram @{found_ig_username} (ID: {found_ig_id}) via Facebook Page '{page_name}'!"
+    else:
+        return True, "Token saved successfully! (Note: No linked Instagram Business/Creator account found on your Facebook Pages yet. Ensure your Instagram account is connected to your Facebook Page in Page Settings)."
+
+
+def get_instagram_client(conn) -> tuple[dict | None, str]:
+    """
+    Validates and returns stored Instagram credentials.
+    Returns (creds_dict, error_message).
+    """
+    account_id = db.get_setting(conn, "instagram_account_id", "").strip()
+    access_token = db.get_setting(conn, "instagram_access_token", "").strip() or db.get_setting(conn, "fb_page_token", "").strip()
+    username = db.get_setting(conn, "instagram_username", "").strip()
+
+    if not access_token:
+        return None, "Instagram Access Token is not set. Please Authorize Instagram in Settings."
+
+    if not account_id:
+        return None, "Instagram Account ID is not set. Please link an Instagram Business/Creator account in Settings."
+
+    # Validate token scopes and account
+    try:
+        # Check token scopes via debug_token
+        try:
+            dbg_url = "https://graph.facebook.com/debug_token"
+            dbg_res = requests.get(dbg_url, params={"input_token": access_token, "access_token": access_token}, timeout=10).json()
+            scopes = dbg_res.get("data", {}).get("scopes", [])
+            if scopes:
+                missing = []
+                if "instagram_basic" not in scopes:
+                    missing.append("instagram_basic")
+                if "instagram_content_publish" not in scopes:
+                    missing.append("instagram_content_publish")
+                if missing:
+                    return None, (
+                        f"Your Access Token is missing required Instagram permissions:\n• " + "\n• ".join(missing) +
+                        "\n\nIn Meta Graph API Explorer, click 'Add a Permission', add the missing permission(s) above, and click 'Generate Access Token'."
+                    )
+        except Exception:
+            pass
+
+        val_url = f"https://graph.facebook.com/v26.0/{account_id}"
+        val_params = {
+            "fields": "id,username,name",
+            "access_token": access_token
+        }
+        res = requests.get(val_url, params=val_params, timeout=15)
+        res_json = res.json()
+        if "error" in res_json:
+            return None, f"Instagram validation error: {res_json['error'].get('message')}"
+
+        acc_username = res_json.get("username") or username
+        return {
+            "account_id": account_id,
+            "username": acc_username,
+            "access_token": access_token,
+        }, ""
+    except Exception as e:
+        # Fallback to stored credentials if offline/network hiccup
+        return {
+            "account_id": account_id,
+            "username": username,
+            "access_token": access_token,
+        }, ""
+
+
+class _UploadProgressReader:
+    """File-like wrapper that streams binary data for requests.post while reporting progress."""
+    def __init__(self, file_path: str, callback=None):
+        self.file_path = file_path
+        self.total_size = os.path.getsize(file_path)
+        self.f = open(file_path, "rb")
+        self.uploaded_bytes = 0
+        self.callback = callback
+        self.last_pct = -1
+
+    def read(self, size=-1):
+        chunk = self.f.read(size)
+        if chunk:
+            self.uploaded_bytes += len(chunk)
+            pct = min(100, int((self.uploaded_bytes / self.total_size) * 100))
+            if self.callback and pct != self.last_pct:
+                self.last_pct = pct
+                self.callback(pct)
+        return chunk
+
+    def seek(self, offset, whence=0):
+        return self.f.seek(offset, whence)
+
+    def tell(self):
+        return self.f.tell()
+
+    def __len__(self):
+        return self.total_size
+
+    def close(self):
+        self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def upload_to_instagram_reel(
+    access_token: str,
+    ig_user_id: str,
+    video_path: str,
+    caption: str = "",
+    schedule_time_iso: str = "",
+    log_callback=None,
+    gcs_bucket: str = "",
+    gcs_key_path: str = ""
+) -> tuple[str, str]:
+    """
+    Upload a vertical 9:16 video to Instagram as a Reel using either:
+    1. Google Cloud Storage signed URL (fast-path ingestion), or
+    2. Meta Graph API's resumable container binary stream protocol.
+    Returns (published_media_id, error_message).
+    """
+    if not access_token or not ig_user_id:
+        return "", "Instagram Access Token and Account ID are required."
+
+    if not os.path.isfile(video_path):
+        return "", f"Video file not found: {video_path}"
+
+    import sys
+    import tempfile
+    import subprocess
+    from pipeline import get_binary_path
+
+    # Check GCS settings from arguments or database
+    use_gcs = False
+    actual_gcs_bucket = gcs_bucket
+    actual_gcs_key_path = gcs_key_path
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect("pipeline_data/pipeline.db")
+        c = conn.cursor()
+        c.execute("SELECT key, value FROM settings WHERE key IN ('instagram_use_gcs', 'instagram_gcs_bucket', 'instagram_gcs_key_path')")
+        gcs_settings = dict(c.fetchall())
+        conn.close()
+
+        if not actual_gcs_bucket:
+            actual_gcs_bucket = gcs_settings.get("instagram_gcs_bucket", "")
+        if not actual_gcs_key_path:
+            actual_gcs_key_path = gcs_settings.get("instagram_gcs_key_path", "")
+        
+        gcs_flag = gcs_settings.get("instagram_use_gcs", "1")
+        if gcs_flag in ("1", "true", "True") and actual_gcs_bucket and actual_gcs_key_path and os.path.isfile(actual_gcs_key_path):
+            use_gcs = True
+    except Exception:
+        pass
+
+    # Step 0: Ensure video complies with Instagram Reel specifications (1080x1920, H.264, yuv420p)
+    actual_video_path = video_path
+    temp_transcoded = None
+    gcs_blob = None
+
+    try:
+        try:
+            ffprobe_bin = get_binary_path("ffprobe")
+            probe_cmd = [
+                ffprobe_bin, "-v", "error",
+                "-show_entries", "stream=width,height,codec_name,pix_fmt:format=duration",
+                "-of", "json", video_path
+            ]
+            probe_out = subprocess.check_output(probe_cmd, stderr=subprocess.DEVNULL)
+            probe_json = json.loads(probe_out)
+            streams = probe_json.get("streams", [{}])
+            probe_data = streams[0] if streams else {}
+            v_codec = probe_data.get("codec_name", "").lower()
+            v_w = int(probe_data.get("width", 0))
+            v_h = int(probe_data.get("height", 0))
+            v_pix = probe_data.get("pix_fmt", "").lower()
+            v_dur = float(probe_json.get("format", {}).get("duration", 0) or 0)
+
+            needs_transcode = (v_codec != "h264" or v_w != 1080 or v_h != 1920 or "420" not in v_pix or v_dur > 900.0)
+
+            if needs_transcode:
+                reasons = []
+                if v_dur > 900.0:
+                    reasons.append(f"trimming {int(v_dur)}s to 15m (900s) Reel API limit")
+                if v_codec != "h264" or v_w != 1080 or v_h != 1920 or "420" not in v_pix:
+                    reasons.append(f"optimizing format ({v_codec} {v_w}x{v_h}) to standard 1080x1920 H.264")
+                if log_callback:
+                    log_callback(f"Optimizing video for Instagram Reel ({', '.join(reasons)})...")
+
+                ffmpeg_bin = get_binary_path("ffmpeg")
+                temp_transcoded = os.path.join(tempfile.gettempdir(), f"ig_reel_{int(time.time())}.mp4")
+                vcodec_args = [
+                    "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level", "4.0",
+                    "-r", "30", "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
+                    "-crf", "22", "-pix_fmt", "yuv420p", "-color_range", "tv",
+                    "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"
+                ]
+
+                time_args = ["-ss", "0", "-t", "900"] if v_dur > 900.0 else []
+                audio_args = ["-af", "afade=t=out:st=897:d=3", "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"] if v_dur > 900.0 else ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"]
+
+                conv_cmd = [
+                    ffmpeg_bin, "-y"
+                ] + time_args + [
+                    "-i", video_path,
+                    "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+                ] + vcodec_args + audio_args + [
+                    "-movflags", "+faststart",
+                    temp_transcoded
+                ]
+                subprocess.run(conv_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if os.path.isfile(temp_transcoded):
+                    actual_video_path = temp_transcoded
+        except Exception as probe_err:
+            if log_callback:
+                log_callback(f"Format check note: using source video ({probe_err})")
+
+        file_size = os.path.getsize(actual_video_path)
+
+        # 1. Step 1: Initialize Media Container (via GCS Signed URL or Direct Resumable)
+        init_url = f"https://graph.facebook.com/v26.0/{ig_user_id}/media"
+        init_data = {
+            "media_type": "REELS",
+            "caption": caption[:2200],
+            "share_to_feed": "true",
+            "access_token": access_token
+        }
+
+        # If GCS enabled, upload to bucket and generate signed URL
+        if use_gcs:
+            try:
+                from google.cloud import storage
+                import datetime as dt_mod
+                
+                gcs_client = storage.Client.from_service_account_json(actual_gcs_key_path)
+                bucket = gcs_client.bucket(actual_gcs_bucket)
+                blob_name = f"temp_reels/reel_{int(time.time())}_{os.path.basename(actual_video_path)}"
+                gcs_blob = bucket.blob(blob_name)
+
+                if log_callback:
+                    log_callback(f"Uploading optimized Reel to Google Cloud Storage ({file_size / (1024*1024):.1f} MB)...")
+
+                gcs_blob.upload_from_filename(actual_video_path, content_type="video/mp4")
+
+                signed_url = gcs_blob.generate_signed_url(
+                    version="v4",
+                    expiration=dt_mod.timedelta(hours=2),
+                    method="GET"
+                )
+
+                init_data["video_url"] = signed_url
+                if log_callback:
+                    log_callback("Google Cloud temporary URL generated. Initializing Meta fast-path container...")
+            except Exception as gcs_err:
+                if log_callback:
+                    log_callback(f"GCS upload fallback notice ({gcs_err}). Switching to direct streaming...")
+                init_data["upload_type"] = "resumable"
+        else:
+            init_data["upload_type"] = "resumable"
+            if log_callback:
+                log_callback("Initializing Instagram Reel media container (direct streaming)...")
+
+        # Note: Meta Graph API restricts 'scheduled_publish_time' on Reels containers to whitelisted partner apps.
+        # Passing scheduled_publish_time causes error '(#3) User must be on whitelist'. Reels are published directly upon processing.
+        if schedule_time_iso and log_callback:
+            log_callback(f"Instagram Reel will be published upon processing completion (scheduled date: {schedule_time_iso}).")
+
+        init_res = requests.post(init_url, data=init_data, timeout=30)
+        init_json = init_res.json()
+        if "error" in init_json:
+            return "", f"Instagram Init Error: {init_json['error'].get('message')}"
+
+        container_id = init_json.get("id")
+        upload_uri = init_json.get("uri")
+
+        if not container_id:
+            return "", "Instagram API did not return a media container ID."
+
+        if log_callback:
+            log_callback(f"Instagram media container created (ID: {container_id})")
+
+        # If upload_uri returned, stream video file directly via resumable protocol
+        if upload_uri:
+            if log_callback:
+                log_callback(f"Uploading Reel video data ({file_size / (1024*1024):.1f} MB)...")
+
+            import re
+            curl_bin = get_binary_path("curl") or "curl"
+            curl_cmd = [
+                curl_bin, "-#",
+                "-X", "POST", upload_uri,
+                "-H", f"Authorization: OAuth {access_token}",
+                "-H", "offset: 0",
+                "-H", f"file_size: {file_size}",
+                "--data-binary", f"@{actual_video_path}",
+                "--write-out", "\n%{http_code}"
+            ]
+
+            proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            last_reported_pct = -1
+
+            # Read stderr for curl progress bar
+            while True:
+                line = proc.stderr.readline()
+                if not line and proc.poll() is not None:
+                    break
+                if line:
+                    match = re.search(r'(\d+(?:\.\d+)?)%', line)
+                    if match:
+                        pct = int(float(match.group(1)))
+                        if pct != last_reported_pct and (pct % 5 == 0 or pct == 100):
+                            last_reported_pct = pct
+                            if log_callback:
+                                log_callback(f"Uploading to Instagram: {pct}% complete...")
+
+            stdout_data, _ = proc.communicate()
+            stdout_lines = stdout_data.strip().rsplit("\n", 1)
+            response_body = stdout_lines[0] if len(stdout_lines) > 1 else ""
+            http_status = int(stdout_lines[-1]) if stdout_lines[-1].isdigit() else 0
+
+            # Verify if upload succeeded (200 OK or container transitioned)
+            upload_ok = (http_status == 200)
+            if not upload_ok:
+                # Check if container actually accepted the media stream despite edge proxy status
+                try:
+                    chk_res = requests.get(
+                        f"https://graph.facebook.com/v26.0/{container_id}",
+                        params={"fields": "status_code,status", "access_token": access_token},
+                        timeout=15
+                    )
+                    chk_code = chk_res.json().get("status_code", "")
+                    if chk_code in ("IN_PROGRESS", "FINISHED"):
+                        upload_ok = True
+                except Exception:
+                    pass
+
+            if not upload_ok:
+                err_msg = f"HTTP {http_status}"
+                try:
+                    resp_json = json.loads(response_body)
+                    err_msg = resp_json.get("message") or resp_json.get("error", {}).get("message") or err_msg
+                except Exception:
+                    pass
+                return "", f"Instagram video upload failed: {err_msg}"
+
+            if log_callback:
+                log_callback("Video bytes transferred successfully. Checking processing status...")
+
+        # 2. Step 2: Poll Container Processing Status
+        time.sleep(10)  # Initial buffer for Meta ingestion
+
+        status_url = f"https://graph.facebook.com/v26.0/{container_id}"
+        status_params = {
+            "fields": "status_code,status",
+            "access_token": access_token
+        }
+
+        max_attempts = 60  # 60 checks * 15s = 900s (15 minutes max)
+        status_code = ""
+        rate_limit_hits = 0
+
+        for attempt in range(max_attempts):
+            try:
+                st_res = requests.get(status_url, params=status_params, timeout=25)
+                st_json = st_res.json()
+
+                # Handle Meta API rate limit or error responses gracefully
+                if "error" in st_json:
+                    err_info = st_json["error"]
+                    err_code = err_info.get("code", 0)
+                    err_msg = err_info.get("message", "")
+
+                    if err_code == 4 or "request limit" in err_msg.lower():
+                        rate_limit_hits += 1
+                        if rate_limit_hits > 6:
+                            return "", "Meta hourly API quota reached. Please wait 15-30 minutes for Meta's hourly window to reset and click Deploy again."
+                        if log_callback:
+                            log_callback(f"Meta request limit active. Pausing 90s to allow hourly quota window to clear (pause {rate_limit_hits}/6)...")
+                        time.sleep(90)
+                        continue
+                    else:
+                        return "", f"Instagram Status Error: {err_msg}"
+
+                status_code = st_json.get("status_code", "")
+
+                if log_callback:
+                    log_callback(f"Instagram processing status: {status_code} (check {attempt + 1}/{max_attempts})")
+
+                if status_code == "FINISHED":
+                    break
+                elif status_code == "ERROR":
+                    err_details = st_json.get("status", "Unknown processing error")
+                    return "", f"Instagram video processing failed: {err_details}"
+                elif status_code == "EXPIRED":
+                    return "", "Instagram media container expired before publishing."
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"Status check warning: {e}")
+
+            time.sleep(15)  # 15s between checks
+
+        # DO NOT attempt to publish if processing has not finished
+        if status_code != "FINISHED":
+            return "", f"Instagram video processing timed out after {max_attempts * 15}s (Last status: {status_code or 'Unknown'}). Please retry deployment."
+
+        # Brief grace period after FINISHED to ensure Meta's distributed edge servers propagate container readiness
+        time.sleep(5)
+
+        # 3. Step 3: Publish Media Container Immediately
+        if log_callback:
+            log_callback("Publishing Instagram Reel to feed...")
+
+        publish_url = f"https://graph.facebook.com/v26.0/{ig_user_id}/media_publish"
+        pub_data = {
+            "creation_id": container_id,
+            "access_token": access_token
+        }
+
+        media_id = None
+        for pub_attempt in range(6):
+            pub_res = requests.post(publish_url, data=pub_data, timeout=30)
+            pub_json = pub_res.json()
+            if "error" not in pub_json:
+                media_id = pub_json.get("id")
+                break
+
+            err_obj = pub_json.get("error", {})
+            err_msg = err_obj.get("message", "Unknown error")
+            err_subcode = err_obj.get("error_subcode", 0)
+
+            # "Media ID is not available" (error subcode 2207027) means Meta's edge servers are still finalizing/propagating the container
+            if ("Media ID is not available" in err_msg or "not ready" in err_msg.lower() or err_subcode == 2207027) and pub_attempt < 5:
+                if log_callback:
+                    log_callback(f"Media container synchronizing on Meta servers... retrying publish in 10s (attempt {pub_attempt + 1}/6)")
+                time.sleep(10)
+            else:
+                return "", f"Instagram Publish Error: {err_msg}"
+
+        if not media_id:
+            return "", "Instagram API did not return published media ID."
+
+        if log_callback:
+            log_callback(f"Instagram Reel published successfully! Media ID: {media_id}")
+
+        return media_id, ""
+    except Exception as e:
+        return "", f"Unexpected error during Instagram Reel upload: {e}"
+    finally:
+        if gcs_blob:
+            try:
+                gcs_blob.delete()
+                if log_callback:
+                    log_callback("Cleaned up temporary video from Google Cloud Storage.")
+            except Exception:
+                pass
+        if temp_transcoded and os.path.isfile(temp_transcoded):
+            try:
+                os.remove(temp_transcoded)
+            except Exception:
+                pass
+

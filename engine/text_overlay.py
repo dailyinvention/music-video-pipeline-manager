@@ -39,6 +39,7 @@ def find_font(name: str) -> str:
         return name
 
     search_dirs = [
+        "/System/Library/Fonts/Supplemental",
         "/System/Library/Fonts",
         "/Library/Fonts",
         os.path.expanduser("~/Library/Fonts"),
@@ -114,6 +115,19 @@ def probe_video(path: str) -> tuple[int, int, float]:
             duration = 0.0
 
     return w, h, duration
+
+
+def has_audio(path: str) -> bool:
+    """Return True if the file carries at least one audio stream."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=codec_type",
+        "-of", "csv=p=0",
+        path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode == 0 and "audio" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -197,14 +211,48 @@ def render_text_png(
     max_w = video_w - 2 * pad_x
     max_h = video_h - 2 * pad_y
 
+    # Font sizing: if explicit fontsize is provided, treat it as normalized for 1080p (or absolute if small),
+    # otherwise compute a proportional, balanced size matching the standard 9:16 vertical styling.
+    scale_factor = 1.0
     if fontsize is not None:
-        # Manual font size — just wrap to fit width
-        font = ImageFont.truetype(font_path, fontsize)
+        # If user/pipeline passed a font size (e.g. 90 for 1080-width baseline)
+        base_size = int(round(fontsize * (min(video_w, video_h) / 1080.0))) if min(video_w, video_h) != 1080 else fontsize
+        target_size = max(18, min(base_size, int(video_w * 0.12)))
+        try:
+            font = ImageFont.truetype(font_path, target_size)
+        except Exception:
+            font = ImageFont.load_default()
         wrapped = word_wrap(text, font, max_w, draw)
     else:
-        # Auto-size: find the largest font that fits with wrapping
-        font, wrapped = fit_font_size(draw, text, font_path, max_w, max_h)
-        fontsize = font.size
+        # Auto-size with reasonable proportional bounds
+        lo, hi = 18, max(24, int(video_w * 0.12))
+        best_font = None
+        best_wrapped = text.strip()
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            try:
+                f = ImageFont.truetype(font_path, mid)
+            except Exception:
+                f = ImageFont.load_default()
+            w_text = word_wrap(text.strip(), f, max_w, draw)
+            bbox = draw.multiline_textbbox((0, 0), w_text, font=f, align="center")
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            if tw <= max_w and th <= max_h:
+                best_font = f
+                best_wrapped = w_text
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best_font is None:
+            try:
+                best_font = ImageFont.truetype(font_path, 28)
+            except Exception:
+                best_font = ImageFont.load_default()
+            best_wrapped = word_wrap(text.strip(), best_font, max_w, draw)
+        font = best_font
+        wrapped = best_wrapped
+
+    fontsize = getattr(font, "size", 30)
 
     bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, align="center")
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -218,15 +266,19 @@ def render_text_png(
         y = (video_h - th) // 2
 
     if shadow:
-        offset = max(3, fontsize // 15)
+        offset = max(3, int(fontsize * 0.05))
         draw.multiline_text(
             (x + offset, y + offset), wrapped, font=font,
-            fill=(*shadow_color, 230), align="center",
+            fill=(*shadow_color, 240), align="center",
         )
 
+    st_w = max(1, int(fontsize * 0.02))
     draw.multiline_text(
         (x, y), wrapped, font=font,
-        fill=(*color, 255), align="center",
+        fill=(*color, 255),
+        stroke_width=st_w,
+        stroke_fill=(0, 0, 0, 160),
+        align="center",
     )
 
     img.save(png_path)
@@ -292,13 +344,19 @@ def overlay_text(
 
     fc = build_overlay_filter(fade_in, fade_out, duration)
 
+    # Pad the source audio with infinite silence so -shortest clamps the output
+    # to the VIDEO length instead of truncating the video to the audio length.
+    audio_present = has_audio(input_path)
+    if audio_present:
+        fc += ";[0:a]apad[aout]"
+
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
         "-loop", "1", "-i", png_path,
         "-filter_complex", fc,
         "-map", "[vout]",
-        "-map", "0:a?",
+        "-map", "[aout]" if audio_present else "0:a?",
         "-c:v", vcodec,
     ]
     if "videotoolbox" in vcodec:
@@ -364,8 +422,8 @@ def main():
         help="Text to display. Use multiple --text flags for multiple lines.",
     )
     parser.add_argument(
-        "--font", "-f", default="Helvetica",
-        help="Font name or path to .ttf/.otf file (default: Helvetica).",
+        "--font", "-f", default="Baskerville",
+        help="Font name or path to .ttf/.otf file (default: Baskerville).",
     )
     parser.add_argument(
         "--fontsize", type=int, default=None,

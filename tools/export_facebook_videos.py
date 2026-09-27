@@ -62,7 +62,7 @@ def export_facebook_videos():
 
     print(f"--- Fetching Videos for Facebook Page ID: {page_id} ---")
 
-    url = f"https://graph.facebook.com/v19.0/{page_id}/videos"
+    url = f"https://graph.facebook.com/v26.0/{page_id}/videos"
     params = {
         "fields": "id,title,description,created_time",
         "limit": 100,

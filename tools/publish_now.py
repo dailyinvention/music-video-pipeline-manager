@@ -202,7 +202,7 @@ def update_facebook_post_for_project(conn, project, page_id, page_token, templat
         return True
     else:
         print("   Updating Facebook Video & Timeline Feed Post text via Graph API...")
-        url_vid = f"https://graph.facebook.com/v19.0/{fb_vid_id}"
+        url_vid = f"https://graph.facebook.com/v26.0/{fb_vid_id}"
         payload_vid = {
             "access_token": page_token,
             "description": rendered_desc
@@ -215,7 +215,7 @@ def update_facebook_post_for_project(conn, project, page_id, page_token, templat
             post_id = get_resp.get("post_id")
             if post_id:
                 full_post_id = f"{page_id}_{post_id}" if "_" not in str(post_id) and page_id else str(post_id)
-                url_post = f"https://graph.facebook.com/v19.0/{full_post_id}"
+                url_post = f"https://graph.facebook.com/v26.0/{full_post_id}"
                 payload_post = {
                     "access_token": page_token,
                     "message": rendered_desc

@@ -68,7 +68,11 @@ def init_db(db_path: str) -> sqlite3.Connection:
                 tiktok_upload_status TEXT DEFAULT 'pending',
                 tiktok_title_body TEXT DEFAULT '',
                 tiktok_description_body TEXT DEFAULT '',
-                tiktok_schedule_time TEXT DEFAULT ''
+                tiktok_schedule_time TEXT DEFAULT '',
+                process_instagram INTEGER DEFAULT 0,
+                instagram_upload_status TEXT DEFAULT 'pending',
+                instagram_caption_body TEXT DEFAULT '',
+                instagram_schedule_time TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS process_log (
@@ -98,9 +102,9 @@ def init_db(db_path: str) -> sqlite3.Connection:
             conn.execute("ALTER TABLE projects ADD COLUMN skip_shorts INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
-        for col in ["process_facebook", "process_youtube", "process_tiktok"]:
+        for col in ["process_facebook", "process_youtube", "process_tiktok", "process_instagram"]:
             try:
-                conn.execute(f"ALTER TABLE projects ADD COLUMN {col} INTEGER DEFAULT 1")
+                conn.execute(f"ALTER TABLE projects ADD COLUMN {col} INTEGER DEFAULT " + ("0" if col in ("process_tiktok", "process_instagram") else "1"))
             except sqlite3.OperationalError:
                 pass
         try:
@@ -111,12 +115,12 @@ def init_db(db_path: str) -> sqlite3.Connection:
             conn.execute("ALTER TABLE projects ADD COLUMN negative_logo INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
-        for col in ["fb_post_body", "yt_title_body", "yt_description_body", "short_title_body", "short_description_body", "fb_schedule_time", "yt_schedule_time", "short_schedule_time", "description_body", "tiktok_title_body", "tiktok_description_body", "tiktok_schedule_time"]:
+        for col in ["fb_post_body", "yt_title_body", "yt_description_body", "short_title_body", "short_description_body", "fb_schedule_time", "yt_schedule_time", "short_schedule_time", "description_body", "tiktok_title_body", "tiktok_description_body", "tiktok_schedule_time", "instagram_caption_body", "instagram_schedule_time"]:
             try:
                 conn.execute(f"ALTER TABLE projects ADD COLUMN {col} TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
-        for col in ["fb_upload_status", "yt_upload_status", "short_upload_status", "tiktok_upload_status"]:
+        for col in ["fb_upload_status", "yt_upload_status", "short_upload_status", "tiktok_upload_status", "instagram_upload_status"]:
             try:
                 conn.execute(f"ALTER TABLE projects ADD COLUMN {col} TEXT DEFAULT 'pending'")
             except sqlite3.OperationalError:
@@ -168,14 +172,14 @@ def create_project(conn: sqlite3.Connection, folder_path: str,
                    youtube_video: str = "", facebook_audio: str = "",
                    skip_shorts: int = 0, process_facebook: int = 1,
                    process_youtube: int = 1, negative_logo: int = 0,
-                   process_tiktok: int = 0) -> int:
+                   process_tiktok: int = 0, process_instagram: int = 0) -> int:
     """Insert a new project. Returns the new row id."""
     with _lock:
         cur = conn.execute(
             """INSERT OR IGNORE INTO projects
-               (folder_path, name, video_file, audio_file, facebook_video, youtube_video, facebook_audio, skip_shorts, process_facebook, process_youtube, negative_logo, process_tiktok)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (folder_path, name, video_file or youtube_video, audio_file, facebook_video, youtube_video or video_file, facebook_audio, skip_shorts, process_facebook, process_youtube, negative_logo, process_tiktok),
+               (folder_path, name, video_file, audio_file, facebook_video, youtube_video, facebook_audio, skip_shorts, process_facebook, process_youtube, negative_logo, process_tiktok, process_instagram)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (folder_path, name, video_file or youtube_video, audio_file, facebook_video, youtube_video or video_file, facebook_audio, skip_shorts, process_facebook, process_youtube, negative_logo, process_tiktok, process_instagram),
         )
         conn.commit()
         return cur.lastrowid

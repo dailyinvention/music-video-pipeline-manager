@@ -461,7 +461,7 @@ def render_full_video_thumbnail_overlay(
     title_size = max(14, int(round(h * 0.082 * scale_factor)))
     series_size = max(11, int(round(h * 0.044 * scale_factor)))
     quote_size = max(12, int(round(h * 0.052 * scale_factor)))
-    badge_size = max(11, int(round(h * 0.044 * scale_factor)))
+    badge_size = max(9, int(round(h * 0.035 * scale_factor)))
 
     font_path = resolve_font_path(font_name)
     try:
@@ -490,7 +490,6 @@ def render_full_video_thumbnail_overlay(
     draw_meas = ImageDraw.Draw(canvas)
 
     lines_to_render = []
-    badge_lines = []
 
     if title.strip():
         w_title = _wrap_text(title.strip(), t_font, max_text_width, draw_meas)
@@ -524,10 +523,9 @@ def render_full_video_thumbnail_overlay(
             if l.strip():
                 bbox = draw_meas.textbbox((0, 0), l, font=b_font)
                 lh = bbox[3] - bbox[1]
-                lw = bbox[2] - bbox[0]
-                badge_lines.append((l, b_font, lh, lw))
+                lines_to_render.append(("badge", l, b_font, lh, (200, 225, 255, 230)))
 
-    if not lines_to_render and not badge_lines:
+    if not lines_to_render:
         return canvas.convert("RGB")
 
     # Start ~8% from the top
@@ -559,25 +557,9 @@ def render_full_video_thumbnail_overlay(
             spacing += int(series_size * 0.20)
         elif item_type == "quote":
             spacing += int(quote_size * 0.25)
+        elif item_type == "badge":
+            spacing += int(badge_size * 0.20)
         curr_y += line_h + spacing
-
-    # Pill badge shadow
-    pill_padding_x = max(8, int(badge_size * 0.65))
-    pill_padding_y = max(4, int(badge_size * 0.32))
-
-    if badge_lines:
-        b_shadow_y = curr_y + int(badge_size * 0.25)
-        for _, _, b_lh, b_lw in badge_lines:
-            s_off = max(3, int(b_lh * 0.08))
-            pill_rect_s = [
-                pad_x + s_off,
-                b_shadow_y - pill_padding_y + s_off,
-                pad_x + b_lw + pill_padding_x * 2 + s_off,
-                b_shadow_y + b_lh + pill_padding_y + s_off,
-            ]
-            pill_r_s = (pill_rect_s[3] - pill_rect_s[1]) // 2
-            s_draw.rounded_rectangle(pill_rect_s, radius=pill_r_s, fill=(0, 0, 0, 200))
-            b_shadow_y += b_lh + pill_padding_y * 2 + int(badge_size * 0.20)
 
     shadow_blurred = shadow_layer.filter(ImageFilter.GaussianBlur(radius=6))
     canvas = Image.alpha_composite(canvas, shadow_blurred)
@@ -600,34 +582,9 @@ def render_full_video_thumbnail_overlay(
             spacing += int(series_size * 0.20)
         elif item_type == "quote":
             spacing += int(quote_size * 0.25)
+        elif item_type == "badge":
+            spacing += int(badge_size * 0.20)
         curr_y += line_h + spacing
-
-    # Draw Pill Badge
-    if badge_lines:
-        b_y = curr_y + int(badge_size * 0.25)
-        border_w = max(1, int(badge_size * 0.04))
-        for b_text, font, b_lh, b_lw in badge_lines:
-            pill_rect = [
-                pad_x,
-                b_y - pill_padding_y,
-                pad_x + b_lw + pill_padding_x * 2,
-                b_y + b_lh + pill_padding_y,
-            ]
-            pill_radius = (pill_rect[3] - pill_rect[1]) // 2
-            draw.rounded_rectangle(
-                pill_rect,
-                radius=pill_radius,
-                fill=(15, 25, 45, 210),
-                outline=(120, 185, 255, 190),
-                width=border_w,
-            )
-            draw.text(
-                (pad_x + pill_padding_x, b_y),
-                b_text,
-                font=font,
-                fill=(235, 245, 255, 255),
-            )
-            b_y += b_lh + pill_padding_y * 2 + int(badge_size * 0.20)
 
     return canvas.convert("RGB")
 
@@ -709,20 +666,6 @@ def render_short_thumbnail_overlay(
         y = h - pad_y - th
     else:  # "center"
         y = (h - th) // 2
-
-    # Scrim behind text for contrast
-    scrim = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    scrim_draw = ImageDraw.Draw(scrim)
-    scrim_pad_y = int(th * 0.35)
-    scrim_top = max(0, y - scrim_pad_y)
-    scrim_bot = min(h, y + th + scrim_pad_y)
-
-    for sy in range(scrim_top, scrim_bot):
-        rel = (sy - scrim_top) / max(1, (scrim_bot - scrim_top))
-        alpha = int(140 * math.sin(rel * math.pi))
-        scrim_draw.line([(0, sy), (w, sy)], fill=(0, 0, 0, alpha))
-
-    canvas = Image.alpha_composite(canvas, scrim)
 
     # Soft, diffuse drop shadow layer
     shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))

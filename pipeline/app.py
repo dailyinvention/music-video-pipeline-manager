@@ -264,13 +264,18 @@ class PipelineApp(ttk.Window):
             bool(project.get("process_tiktok") if project.get("process_tiktok") is not None else 0) or
             project.get("tiktok_upload_status") == "done"
         )
+        need_ig = (
+            bool(project.get("process_instagram") if project.get("process_instagram") is not None else 0) or
+            project.get("instagram_upload_status") == "done"
+        )
         
         fb_ok = not need_fb or (project.get("fb_upload_status") == "done")
         yt_ok = not need_yt or (project.get("yt_upload_status") == "done")
         short_ok = not need_short or (project.get("short_upload_status") == "done")
         tiktok_ok = not need_tiktok or (project.get("tiktok_upload_status") == "done")
+        ig_ok = not need_ig or (project.get("instagram_upload_status") == "done")
         
-        if fb_ok and yt_ok and short_ok and tiktok_ok:
+        if fb_ok and yt_ok and short_ok and tiktok_ok and ig_ok:
             db.update_project(self.conn, pid, status="done", error_message="")
         else:
             if project.get("status") == "done":
@@ -356,7 +361,7 @@ class PipelineApp(ttk.Window):
             self._show_done_summary_panel(f, project)
 
         # ---- Editable fields (staged / queued / error / pending_deployment / done) ----
-        is_editable = status in ("staged", "error", "queued", "pending_deployment", "done")
+        is_editable = status in ("staged", "error", "queued", "pending_deployment", "pending_link", "done")
 
         # Folder path
         ttk.Label(
@@ -524,6 +529,15 @@ class PipelineApp(ttk.Window):
             bootstyle="success-square-toggle"
         )
         self._proc_tiktok_chk.pack(side=LEFT, padx=(0, 15))
+
+        self._proc_ig_var = tk.BooleanVar(value=bool(project.get("process_instagram") if project.get("process_instagram") is not None else 0))
+        self._proc_ig_chk = ttk.Checkbutton(
+            settings_frame_2, text="Process Instagram Reel",
+            variable=self._proc_ig_var,
+            state="normal" if is_editable else "disabled",
+            bootstyle="success-square-toggle"
+        )
+        self._proc_ig_chk.pack(side=LEFT, padx=(0, 15))
 
         self._proc_canvas_var = tk.BooleanVar(value=bool(project.get("generate_spotify_canvas", 0)))
         self._proc_canvas_chk = ttk.Checkbutton(
@@ -821,6 +835,11 @@ class PipelineApp(ttk.Window):
             tiktok_desc_template = db.get_setting(self.conn, "tiktok_desc_template", "{{body}}\n\n#music #sleep #relaxing #fyp #foryou")
             tiktok_desc_val = render_template(tiktok_desc_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
 
+        instagram_caption_val = project.get("instagram_caption_body", "") or ""
+        if not instagram_caption_val:
+            ig_template = db.get_setting(self.conn, "instagram_caption_template", "{{body}}\n\nTitle: {{title}}\n\nTo watch the full-length 4K video, follow the link in bio. 💤✨\n\n#music #sleep #relaxing #reels #ambient\n\n© {{year}} Music To Sleep To. All Rights Reserved.\nMade with the help of Suno.")
+            instagram_caption_val = render_template(ig_template, desc_body, project.get("name", ""), yt_url=yt_url_val, overlay_text=overlay_val, pill_badge=pill_badge_val)
+
         tags_val = project.get("tags", "") or ""
         if not tags_val:
             tags_val = db.get_setting(self.conn, "default_tags", "")
@@ -847,6 +866,7 @@ class PipelineApp(ttk.Window):
             short_desc_template = db.get_setting(self.conn, "short_desc_template", "Relaxing music to sooth the soul and help guide you to sleep.\n\nChannel:  @music_to_sleep_to  \nVisit here to view the full-length 4k Youtube video: {{youtube-url}}\n\n© {{year}} Music To Sleep To. All Rights Reserved.\nMade with the help of Suno.")
             tiktok_title_template = db.get_setting(self.conn, "tiktok_title_template", "{{title}} #shorts #fyp #foryou")
             tiktok_desc_template = db.get_setting(self.conn, "tiktok_desc_template", "{{body}}\n\n#music #sleep #relaxing #fyp #foryou")
+            ig_template = db.get_setting(self.conn, "instagram_caption_template", "{{body}}\n\nTitle: {{title}}\n\nTo watch the full-length 4K video, follow the link in bio. 💤✨\n\n#music #sleep #relaxing #reels #ambient\n\n© {{year}} Music To Sleep To. All Rights Reserved.\nMade with the help of Suno.")
             
             current_yt_id = ""
             for s in db.get_steps(self.conn, pid):
@@ -865,6 +885,7 @@ class PipelineApp(ttk.Window):
             st_d = render_template(short_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
             tt_t = render_template(tiktok_title_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
             tt_d = render_template(tiktok_desc_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
+            ig_c = render_template(ig_template, current_desc, name, yt_url=current_yt_url, overlay_text=current_overlay, pill_badge=current_badge_val)
             
             self._fb_post_body_text.configure(state="normal")
             self._fb_post_body_text.delete("1.0", tk.END)
@@ -896,6 +917,13 @@ class PipelineApp(ttk.Window):
                 self._tiktok_desc_body_text.insert("1.0", tt_d)
                 if not is_editable:
                     self._tiktok_desc_body_text.configure(state="disabled")
+
+            if hasattr(self, "_ig_caption_body_text") and self._ig_caption_body_text:
+                self._ig_caption_body_text.configure(state="normal")
+                self._ig_caption_body_text.delete("1.0", tk.END)
+                self._ig_caption_body_text.insert("1.0", ig_c)
+                if not is_editable:
+                    self._ig_caption_body_text.configure(state="disabled")
                 
             if show_info:
                 messagebox.showinfo("Success", "Templates successfully re-applied using current quote body!")
@@ -1348,6 +1376,70 @@ class PipelineApp(ttk.Window):
         self._tiktok_time_entry.pack(side=LEFT)
         ttk.Label(tiktok_sched_frame, text=" (HH:MM - Local Time)", bootstyle="secondary").pack(side=LEFT, padx=3)
 
+        # 6. Instagram Reel Section
+        ig_lf = ttk.LabelFrame(tab_pub, text="Instagram Reel Details")
+        ig_lf.pack(fill=X, pady=5)
+        ig_pad = ttk.Frame(ig_lf, padding=10)
+        ig_pad.pack(fill=X)
+
+        ig_ctrl_frame = ttk.Frame(ig_pad)
+        ig_ctrl_frame.pack(fill=X, pady=(0, 10))
+
+        self._deploy_ig_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ig_ctrl_frame, text="Deploy Instagram Reel", variable=self._deploy_ig_var, state="normal" if is_editable else "disabled").pack(side=LEFT)
+
+        ig_status = project.get("instagram_upload_status", "pending")
+        ig_status_color = "info" if ig_status == "pending" else "success" if ig_status == "done" else "danger"
+        ttk.Label(ig_ctrl_frame, text=f" [{ig_status.upper()}] ", bootstyle=f"inverse-{ig_status_color}").pack(side=LEFT, padx=10)
+
+        def toggle_ig_status():
+            new_status = "pending" if ig_status == "done" else "done"
+            db.update_project(self.conn, pid, instagram_upload_status=new_status)
+            self._check_and_update_overall_done(pid)
+            self._select_project(pid)
+
+        toggle_text = "Mark Pending" if ig_status == "done" else "Mark Deployed"
+        toggle_style = "secondary-outline" if ig_status == "done" else "success-outline"
+        ttk.Button(ig_ctrl_frame, text=toggle_text, bootstyle=toggle_style, command=toggle_ig_status).pack(side=RIGHT)
+
+        ttk.Label(ig_pad, text="Caption / Description Body:").pack(anchor=W, pady=(5, 0))
+        self._ig_caption_body_text = tk.Text(ig_pad, height=3, wrap="word", bg="#2b2b3d", fg="#e0e0e0", insertbackground="#e0e0e0")
+        self._ig_caption_body_text.pack(fill=X, pady=3)
+        self._ig_caption_body_text.insert("1.0", instagram_caption_val)
+        if not is_editable:
+            self._ig_caption_body_text.configure(state="disabled")
+
+        ig_sched_frame = ttk.Frame(ig_pad)
+        ig_sched_frame.pack(fill=X, pady=5)
+        ttk.Label(ig_sched_frame, text="Schedule Time:").pack(side=LEFT)
+
+        ig_time_val = project.get("instagram_schedule_time", "")
+        ig_date_val, ig_time_only = "", ""
+        if ig_time_val:
+            try:
+                parts = ig_time_val.replace("T", " ").split(" ")
+                ig_date_val = parts[0]
+                ig_time_only = parts[1][:5]
+            except Exception:
+                pass
+        self._ig_date_entry = ttk.DateEntry(ig_sched_frame, bootstyle="info", width=12, dateformat="%Y-%m-%d")
+        self._ig_date_entry.pack(side=LEFT, padx=5)
+        if ig_date_val:
+            try:
+                self._ig_date_entry.entry.delete(0, tk.END)
+                self._ig_date_entry.entry.insert(0, ig_date_val)
+            except Exception:
+                pass
+        else:
+            try:
+                self._ig_date_entry.entry.delete(0, tk.END)
+            except Exception:
+                pass
+        self._ig_time_var = tk.StringVar(value=ig_time_only or "21:00")
+        self._ig_time_entry = ttk.Entry(ig_sched_frame, textvariable=self._ig_time_var, width=6, state="normal" if is_editable else "readonly")
+        self._ig_time_entry.pack(side=LEFT)
+        ttk.Label(ig_sched_frame, text=" (HH:MM - Local Time)", bootstyle="secondary").pack(side=LEFT, padx=3)
+
         # ------------------ ACTION BUTTONS FRAME ------------------
         if is_editable:
             actions = ttk.Frame(f)
@@ -1384,6 +1476,11 @@ class PipelineApp(ttk.Window):
                     bootstyle="warning-outline",
                     command=lambda: self._reset_project_to_staged(pid),
                 ).pack(side=LEFT, padx=5)
+            elif status == "pending_link":
+                # The pending-link panel above already provides its own
+                # action buttons (Finish Scheduling, Reset/Re-deploy, etc.);
+                # only "Save Settings" (already added above) applies here.
+                pass
             else:
                 ttk.Button(
                     actions, text="✅ Queue for Processing",
@@ -1712,8 +1809,9 @@ class PipelineApp(ttk.Window):
                     log_callback=print
                 )
                 if success:
-                    db.update_project(self.conn, pid, status="done", error_message="")
-                    
+                    db.update_project(self.conn, pid, error_message="")
+                    self._check_and_update_overall_done(pid)
+
                     # Update Facebook post & YouTube Short with the new YouTube URL!
                     try:
                         sync_facebook_post_with_youtube_url(self.conn, pid, log_callback=print)
@@ -1853,11 +1951,13 @@ class PipelineApp(ttk.Window):
         short_desc_body = self._short_desc_body_text.get("1.0", "end-1c").strip()
         tiktok_title_body = self._tiktok_title_body_var.get().strip() if hasattr(self, "_tiktok_title_body_var") else ""
         tiktok_desc_body = self._tiktok_desc_body_text.get("1.0", "end-1c").strip() if hasattr(self, "_tiktok_desc_body_text") else ""
+        ig_caption_body = self._ig_caption_body_text.get("1.0", "end-1c").strip() if hasattr(self, "_ig_caption_body_text") else ""
         
         fb_schedule_time = self._get_schedule_time(self._fb_date_entry, self._fb_time_var)
         yt_schedule_time = self._get_schedule_time(self._yt_date_entry, self._yt_time_var)
         short_schedule_time = self._get_schedule_time(self._short_date_entry, self._short_time_var)
         tiktok_schedule_time = self._get_schedule_time(self._tiktok_date_entry, self._tiktok_time_var) if hasattr(self, "_tiktok_date_entry") else ""
+        ig_schedule_time = self._get_schedule_time(self._ig_date_entry, self._ig_time_var) if hasattr(self, "_ig_date_entry") else ""
 
         tags_val = self._tags_entry_var.get().strip() if hasattr(self, "_tags_entry_var") else ""
         pill_badge_val = self._img_overlay_badge_var.get().strip() if hasattr(self, "_img_overlay_badge_var") else None
@@ -1872,6 +1972,7 @@ class PipelineApp(ttk.Window):
             process_facebook=int(self._proc_fb_var.get()),
             process_youtube=int(self._proc_yt_var.get()),
             process_tiktok=int(self._proc_tiktok_var.get()) if hasattr(self, "_proc_tiktok_var") else 0,
+            process_instagram=int(self._proc_ig_var.get()) if hasattr(self, "_proc_ig_var") else 0,
             negative_logo=int(self._neg_logo_var.get()),
             short_source_fb=int(self._short_src_fb_var.get()),
             generate_spotify_canvas=int(self._proc_canvas_var.get()),
@@ -1894,10 +1995,12 @@ class PipelineApp(ttk.Window):
             short_description_body=short_desc_body,
             tiktok_title_body=tiktok_title_body,
             tiktok_description_body=tiktok_desc_body,
+            instagram_caption_body=ig_caption_body,
             fb_schedule_time=fb_schedule_time,
             yt_schedule_time=yt_schedule_time,
             short_schedule_time=short_schedule_time,
             tiktok_schedule_time=tiktok_schedule_time,
+            instagram_schedule_time=ig_schedule_time,
             tags=tags_val,
         )
         if pill_badge_val is not None:
@@ -2434,16 +2537,17 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
         db.update_project(
             self.conn, pid,
             status="done",
-            current_step=14,
+            current_step=15,
             fb_upload_status="done",
             yt_upload_status="done",
             short_upload_status="done",
             tiktok_upload_status="done",
+            instagram_upload_status="done",
             error_message="",
         )
         # Seed fake/noop steps in the process log so it displays correctly
         self.conn.execute("DELETE FROM process_log WHERE project_id = ?", (pid,))
-        for step_num in range(1, 15):
+        for step_num in range(1, 16):
             self.conn.execute(
                 """INSERT INTO process_log 
                    (project_id, step_num, step_name, status, output_file, log_text)
@@ -2462,11 +2566,12 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
             yt_upload_status="pending",
             short_upload_status="pending",
             tiktok_upload_status="pending",
+            instagram_upload_status="pending",
             error_message="",
         )
         self.conn.execute(
             "UPDATE process_log SET status = 'pending', started_at = NULL, finished_at = NULL, output_file = '', log_text = '' "
-            "WHERE project_id = ? AND step_num IN (10, 11, 12, 14)",
+            "WHERE project_id = ? AND step_num IN (10, 11, 12, 14, 15)",
             (pid,)
         )
         self.conn.commit()
@@ -2485,45 +2590,67 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
         deploy_yt = self._deploy_yt_var.get() if hasattr(self, "_deploy_yt_var") else True
         deploy_short = self._deploy_short_var.get() if hasattr(self, "_deploy_short_var") else True
         deploy_tiktok = self._deploy_tiktok_var.get() if hasattr(self, "_deploy_tiktok_var") else True
+        deploy_ig = self._deploy_ig_var.get() if hasattr(self, "_deploy_ig_var") else True
 
         # Check if at least one selected platform is going to be deployed
-        any_selected = deploy_fb or deploy_yt or deploy_short or deploy_tiktok
+        any_selected = deploy_fb or deploy_yt or deploy_short or deploy_tiktok or deploy_ig
         if not any_selected:
             messagebox.showwarning(
                 "No Platforms Selected",
-                "Please check at least one platform to deploy (Facebook, YouTube Long, YouTube Short, or TikTok Short)."
+                "Please check at least one platform to deploy (Facebook, YouTube Long, YouTube Short, TikTok Short, or Instagram Reel)."
             )
             return
 
-        errors = []
+        # Validate credentials per platform. A missing/broken credential only
+        # excludes that platform from this run -- it must not block the other
+        # platforms (e.g. Instagram not being configured/pending should never
+        # prevent YouTube from deploying).
+        skipped = []
         if deploy_fb:
             fb_page_id = db.get_setting(self.conn, "fb_page_id", "").strip()
             fb_token = db.get_setting(self.conn, "fb_page_token", "").strip()
             if not fb_page_id or not fb_token:
-                errors.append("Facebook Page ID and Page Access Token are missing in Settings.")
-                
+                skipped.append("Facebook Page ID and Page Access Token are missing in Settings.")
+                deploy_fb = False
+
         if deploy_yt or deploy_short:
             secrets_json = db.get_setting(self.conn, "yt_client_secrets", "").strip()
             if not secrets_json:
-                errors.append("YouTube client secrets JSON is missing in Settings.")
+                skipped.append("YouTube client secrets JSON is missing in Settings.")
+                deploy_yt = deploy_short = False
             else:
                 from pipeline.upload import get_youtube_client
                 creds, err = get_youtube_client(self.conn)
                 if not creds:
-                    errors.append(f"YouTube credentials: {err}")
+                    skipped.append(f"YouTube credentials: {err}")
+                    deploy_yt = deploy_short = False
 
         if deploy_tiktok:
-            from pipeline.upload import get_tiktok_client
-            tt_creds, err_tt = get_tiktok_client(self.conn)
-            if not tt_creds:
-                errors.append(f"TikTok credentials: {err_tt}")
-                
-        if errors:
+            from pipeline.upload import get_zernio_client
+            zn_creds, err_zn = get_zernio_client(self.conn)
+            if not zn_creds:
+                skipped.append(f"Zernio (TikTok) credentials: {err_zn}")
+                deploy_tiktok = False
+
+        if deploy_ig:
+            from pipeline.upload import get_instagram_client
+            ig_creds, err_ig = get_instagram_client(self.conn)
+            if not ig_creds:
+                skipped.append(f"Instagram credentials: {err_ig}")
+                deploy_ig = False
+
+        if not (deploy_fb or deploy_yt or deploy_short or deploy_tiktok or deploy_ig):
             messagebox.showwarning(
                 "Configuration Required",
-                "Please configure settings for enabled platforms:\n\n• " + "\n• ".join(errors)
+                "Please configure settings for enabled platforms:\n\n• " + "\n• ".join(skipped)
             )
             return
+
+        if skipped:
+            messagebox.showwarning(
+                "Some Platforms Skipped",
+                "Deploying the remaining platforms now. These were skipped due to missing/invalid configuration:\n\n• " + "\n• ".join(skipped)
+            )
 
         db.update_project(self.conn, pid, status="deploying", current_step=9)
         self._refresh_list()
@@ -2531,12 +2658,12 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
         
         thread = threading.Thread(
             target=self._run_deployment_thread,
-            args=(pid, deploy_fb, deploy_yt, deploy_short, deploy_tiktok),
+            args=(pid, deploy_fb, deploy_yt, deploy_short, deploy_tiktok, deploy_ig),
             daemon=True
         )
         thread.start()
 
-    def _run_deployment_thread(self, pid: int, deploy_fb: bool, deploy_yt: bool, deploy_short: bool, deploy_tiktok: bool = True):
+    def _run_deployment_thread(self, pid: int, deploy_fb: bool, deploy_yt: bool, deploy_short: bool, deploy_tiktok: bool = True, deploy_ig: bool = True):
         conn = db.get_connection(DB_PATH)
         
         def notify(step_num, status, msg):
@@ -2556,18 +2683,23 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
             yt_video_path = os.path.join(folder, f"{name} 4k (Video).mp4")
             short_video_path = os.path.join(folder, f"{name} - YouTube Short.mp4")
             
-            # Ensure steps 10-12, 14 exist in process_log
+            # Ensure steps 10-12, 14, 15 exist in process_log
             existing_steps = {s["step_num"]: s for s in db.get_steps(conn, pid)}
-            for step_num in (10, 11, 12, 14):
+            for step_num in (10, 11, 12, 14, 15):
                 if step_num not in existing_steps:
                     db.log_step(conn, pid, step_num, STEP_NAMES[step_num], "pending")
                     
+            import importlib
+            import pipeline.upload
+            importlib.reload(pipeline.upload)
             from pipeline.upload import (
                 upload_to_facebook_page,
                 upload_to_youtube,
-                upload_to_tiktok,
+                upload_via_zernio_tiktok,
+                upload_to_instagram_reel,
                 get_youtube_client,
-                get_tiktok_client,
+                get_zernio_client,
+                get_instagram_client,
                 render_template,
                 sync_facebook_post_with_youtube_url
             )
@@ -2787,16 +2919,16 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
                         db.update_step(conn, pid, 14, status="error", log_text=err_msg)
                         db.update_project(conn, pid, tiktok_upload_status="error")
                     else:
-                        tt_creds, err_tt = get_tiktok_client(conn)
-                        if not tt_creds:
-                            errors.append(f"TikTok credentials: {err_tt}")
-                            db.update_step(conn, pid, 14, status="error", log_text=err_tt)
+                        zn_creds, err_zn = get_zernio_client(conn)
+                        if not zn_creds:
+                            errors.append(f"Zernio (TikTok) credentials: {err_zn}")
+                            db.update_step(conn, pid, 14, status="error", log_text=err_zn)
                             db.update_project(conn, pid, tiktok_upload_status="error")
                         else:
                             db.update_step(conn, pid, 14, status="running", started_at=datetime.now().isoformat())
                             db.update_project(conn, pid, current_step=14)
-                            notify(14, "running", "Uploading TikTok Short...")
-                            
+                            notify(14, "running", "Uploading TikTok Short via Zernio...")
+
                             main_yt_id = ""
                             for s in db.get_steps(conn, pid):
                                 if s["step_num"] == 11 and s.get("output_file") and not s["output_file"].startswith("Bypassed"):
@@ -2807,34 +2939,39 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
 
                             tt_title = render_template(project.get("tiktok_title_body", ""), project.get("overlay_text", ""), name, yt_url=tt_yt_url, overlay_text=tt_overlay, pill_badge=project.get("pill_badge", ""))
                             tt_desc = render_template(project.get("tiktok_description_body", ""), project.get("overlay_text", ""), name, yt_url=tt_yt_url, overlay_text=tt_overlay, pill_badge=project.get("pill_badge", ""))
-                            
+                            tt_caption = tt_title.strip()
+                            if tt_desc.strip() and tt_desc.strip() != tt_title.strip():
+                                tt_caption = f"{tt_caption}\n\n{tt_desc.strip()}" if tt_caption else tt_desc.strip()
+                            if tags_list:
+                                tag_str = " ".join(f"#{t.strip('#')}" for t in tags_list if t.strip())
+                                if tag_str:
+                                    tt_caption = f"{tt_caption}\n\n{tag_str}".strip()
+
                             tt_log_lines = []
                             def log_cb_tt(txt):
                                 tt_log_lines.append(txt)
                                 db.update_step(conn, pid, 14, log_text="\n".join(tt_log_lines))
                                 notify(14, "running", txt)
-                                
+
                             tt_privacy = db.get_setting(conn, "tiktok_privacy_level", "SELF_ONLY").strip() or "SELF_ONLY"
-                            pub_id, err = upload_to_tiktok(
-                                tt_creds.get("access_token", ""),
+                            pub_id, err = upload_via_zernio_tiktok(
+                                zn_creds.get("api_key", ""),
+                                zn_creds.get("account_id", ""),
                                 short_video_path,
-                                title=tt_title,
-                                description=tt_desc,
+                                caption=tt_caption,
                                 schedule_time_iso=project.get("tiktok_schedule_time", ""),
                                 privacy_level=tt_privacy,
-                                tags=tags_list,
                                 log_callback=log_cb_tt,
-                                conn=conn
                             )
-                            
+
                             if err:
-                                errors.append(f"TikTok upload: {err}")
+                                errors.append(f"TikTok upload (Zernio): {err}")
                                 db.update_step(conn, pid, 14, status="error", finished_at=datetime.now().isoformat(), log_text=f"Error: {err}")
                                 db.update_project(conn, pid, tiktok_upload_status="error")
                             else:
-                                db.update_step(conn, pid, 14, status="done", finished_at=datetime.now().isoformat(), output_file=pub_id, log_text=f"Uploaded successfully to TikTok. Publish ID: {pub_id}")
+                                db.update_step(conn, pid, 14, status="done", finished_at=datetime.now().isoformat(), output_file=pub_id, log_text=f"Uploaded successfully to TikTok via Zernio. Post ID: {pub_id}")
                                 db.update_project(conn, pid, tiktok_upload_status="done")
-                                notify(14, "done", "TikTok Short Uploaded")
+                                notify(14, "done", "TikTok Short Uploaded (Zernio)")
                 else:
                     db.update_step(conn, pid, 14, status="done", log_text="Bypassed (TikTok already uploaded)")
             else:
@@ -2843,6 +2980,85 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
                 else:
                     db.update_step(conn, pid, 14, status="pending", log_text="Skipped in this deployment run (unchecked)")
                 
+            # ----------------- INSTAGRAM REEL UPLOAD (Step 15) -----------------
+            if deploy_ig:
+                if project.get("instagram_upload_status") != "done":
+                    if not os.path.isfile(short_video_path):
+                        err_msg = f"Video file for Instagram Reel (Short) not found: {short_video_path}"
+                        errors.append(err_msg)
+                        db.update_step(conn, pid, 15, status="error", log_text=err_msg)
+                        db.update_project(conn, pid, instagram_upload_status="error")
+                    else:
+                        sched_ig_iso = project.get("instagram_schedule_time", "").strip()
+                        is_future_schedule = False
+
+                        if sched_ig_iso:
+                            try:
+                                clean_iso = sched_ig_iso.replace("Z", "+00:00")
+                                sched_dt = datetime.fromisoformat(clean_iso)
+                                now_dt = datetime.now(timezone.utc) if sched_dt.tzinfo else datetime.now()
+                                if sched_dt > now_dt:
+                                    is_future_schedule = True
+                            except Exception:
+                                pass
+
+                        # If scheduled for future, queue as pending for the 24/7 background auto-publisher
+                        if is_future_schedule:
+                            msg_sched = f"Instagram Reel queued for 24/7 background auto-publisher (Scheduled: {sched_ig_iso})"
+                            db.update_step(conn, pid, 15, status="pending", log_text=msg_sched)
+                            db.update_project(conn, pid, instagram_upload_status="pending")
+                            notify(15, "pending", f"Instagram Reel Scheduled ({sched_ig_iso})")
+                        else:
+                            # Immediate publish
+                            db.update_step(conn, pid, 15, status="running", started_at=datetime.now().isoformat())
+                            db.update_project(conn, pid, current_step=15)
+                            notify(15, "running", "Uploading Instagram Reel...")
+                            
+                            ig_client, ig_err = get_instagram_client(conn)
+                            if ig_err:
+                                errors.append(f"Instagram client: {ig_err}")
+                                db.update_step(conn, pid, 15, status="error", log_text=f"Authentication error: {ig_err}")
+                                db.update_project(conn, pid, instagram_upload_status="error")
+                            else:
+                                ig_caption = render_template(
+                                    project.get("instagram_caption_body", ""),
+                                    project.get("overlay_text", ""),
+                                    name,
+                                    pill_badge=project.get("pill_badge", "")
+                                )
+                                ig_log_lines = []
+                                def log_cb_ig(txt):
+                                    ig_log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {txt}")
+                                    db.update_step(conn, pid, 15, log_text="\n".join(ig_log_lines))
+                                    notify(15, "running", txt)
+                                    
+                                ig_media_id, ig_upload_err = upload_to_instagram_reel(
+                                    access_token=ig_client["access_token"],
+                                    ig_user_id=ig_client["account_id"],
+                                    video_path=short_video_path,
+                                    caption=ig_caption,
+                                    schedule_time_iso=sched_ig_iso,
+                                    log_callback=log_cb_ig
+                                )
+                                
+                                if ig_upload_err:
+                                    errors.append(f"Instagram upload: {ig_upload_err}")
+                                    full_log = "\n".join(ig_log_lines) + f"\nError: {ig_upload_err}"
+                                    db.update_step(conn, pid, 15, status="error", finished_at=datetime.now().isoformat(), log_text=full_log)
+                                    db.update_project(conn, pid, instagram_upload_status="error")
+                                else:
+                                    full_log = "\n".join(ig_log_lines) + f"\nUploaded successfully to Instagram. Media ID: {ig_media_id}"
+                                    db.update_step(conn, pid, 15, status="done", finished_at=datetime.now().isoformat(), output_file=ig_media_id, log_text=full_log)
+                                    db.update_project(conn, pid, instagram_upload_status="done")
+                                    notify(15, "done", "Instagram Reel Uploaded")
+                else:
+                    db.update_step(conn, pid, 15, status="done", log_text="Bypassed (Instagram already uploaded)")
+            else:
+                if project.get("instagram_upload_status") == "done":
+                    db.update_step(conn, pid, 15, status="done", log_text="Instagram marked as completed")
+                else:
+                    db.update_step(conn, pid, 15, status="pending", log_text="Skipped in this deployment run (unchecked)")
+
             # Finalize
             if errors:
                 err_msg = "; ".join(errors)
@@ -2871,13 +3087,18 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
                     bool(project.get("process_tiktok") if project.get("process_tiktok") is not None else 0) or
                     project.get("tiktok_upload_status") == "done"
                 )
+                need_ig = (
+                    bool(project.get("process_instagram") if project.get("process_instagram") is not None else 0) or
+                    project.get("instagram_upload_status") == "done"
+                )
                 
                 fb_ok = not need_fb or (project.get("fb_upload_status") == "done")
                 yt_ok = not need_yt or (project.get("yt_upload_status") == "done")
                 short_ok = not need_short or (project.get("short_upload_status") == "done")
                 tiktok_ok = not need_tiktok or (project.get("tiktok_upload_status") == "done")
+                ig_ok = not need_ig or (project.get("instagram_upload_status") == "done")
                 
-                all_done = fb_ok and yt_ok and short_ok and tiktok_ok
+                all_done = fb_ok and yt_ok and short_ok and tiktok_ok and ig_ok
                 
                 if not all_done:
                     db.update_project(conn, pid, status="pending_deployment", error_message="")
@@ -4228,7 +4449,7 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
     def _show_settings(self):
         dlg = ttk.Toplevel(self)
         dlg.title("Settings")
-        dlg.geometry("700x650")
+        dlg.geometry("700x750")
         dlg.transient(self)
         dlg.grab_set()
 
@@ -4239,6 +4460,11 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
             f, text="Settings",
             font=("Helvetica", 14, "bold"),
         ).pack(anchor=W, pady=(0, 10))
+
+        # Reserve footer space for the Save button first so it always stays
+        # visible even when a tab's content grows taller than the dialog.
+        settings_footer = ttk.Frame(f)
+        settings_footer.pack(side=BOTTOM, fill=X, pady=(10, 0))
 
         notebook = ttk.Notebook(f)
         notebook.pack(fill=BOTH, expand=True, pady=10)
@@ -4255,15 +4481,19 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
         tab_yt = ttk.Frame(notebook, padding=10)
         notebook.add(tab_yt, text="YouTube Integration")
 
-        # Tab 4: TikTok Integration
-        tab_tiktok = ttk.Frame(notebook, padding=10)
-        notebook.add(tab_tiktok, text="TikTok Integration")
+        # Tab 4: Zernio (TikTok posting backend)
+        tab_zernio = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_zernio, text="Zernio (TikTok)")
 
-        # Tab 5: Gemini
+        # Tab 5: Instagram Integration
+        tab_ig = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_ig, text="Instagram Integration")
+
+        # Tab 6: Gemini
         tab_gemini = ttk.Frame(notebook, padding=10)
         notebook.add(tab_gemini, text="Gemini")
 
-        # Tab 6: Default Templates
+        # Tab 7: Default Templates
         tab_tpl_container = ttk.Frame(notebook, padding=10)
         notebook.add(tab_tpl_container, text="Default Templates")
         tab_tpl = ScrolledFrame(tab_tpl_container, autohide=True)
@@ -4315,6 +4545,106 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
         fb_long_user_token_var = tk.StringVar(value=db.get_setting(self.conn, "fb_long_user_token", ""))
         ttk.Entry(fb_long_user_tok_frame, textvariable=fb_long_user_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
 
+        # Facebook Connection Status & Test Connection
+        fb_status_frame = ttk.Frame(tab_fb)
+        fb_status_frame.pack(fill=X, pady=10)
+        ttk.Label(fb_status_frame, text="Connection Status:", width=18, anchor=W).pack(side=LEFT)
+
+        fb_auth_status_var = tk.StringVar(value="Checking...")
+        fb_status_lbl = ttk.Label(fb_status_frame, textvariable=fb_auth_status_var, font=("Helvetica", 10, "bold"))
+        fb_status_lbl.pack(side=LEFT, padx=5)
+
+        def update_fb_status_style(*args):
+            val = fb_auth_status_var.get()
+            if "✅" in val:
+                fb_status_lbl.configure(bootstyle="success")
+            else:
+                fb_status_lbl.configure(bootstyle="danger")
+
+        fb_auth_status_var.trace_add("write", update_fb_status_style)
+
+        def check_facebook_status():
+            pid = fb_page_id_var.get().strip()
+            ptok = fb_token_var.get().strip() or fb_long_user_token_var.get().strip()
+            if not pid or not ptok:
+                fb_auth_status_var.set("Not Configured ❌")
+                return
+
+            def _bg_chk():
+                try:
+                    import requests
+                    r = requests.get(
+                        f"https://graph.facebook.com/v26.0/{pid}",
+                        params={"fields": "name,id", "access_token": ptok},
+                        timeout=8
+                    ).json()
+                    if "name" in r:
+                        self.after(0, lambda: fb_auth_status_var.set(f"Connected ✅ ({r['name']})"))
+                    else:
+                        self.after(0, lambda: fb_auth_status_var.set("Invalid Token ❌"))
+                except Exception:
+                    self.after(0, lambda: fb_auth_status_var.set("Not Verified ❌"))
+
+            threading.Thread(target=_bg_chk, daemon=True).start()
+
+        check_facebook_status()
+
+        def test_facebook_connection():
+            pid = fb_page_id_var.get().strip()
+            ptok = fb_token_var.get().strip() or fb_long_user_token_var.get().strip()
+            if not pid:
+                messagebox.showwarning("Missing Page ID", "Please enter your Facebook Page ID first.")
+                return
+            if not ptok:
+                messagebox.showwarning("Missing Token", "Please enter a Page Token or Long User Token first.")
+                return
+
+            fb_test_btn.configure(state="disabled", text="Testing...")
+
+            def _thread_test():
+                import requests
+                try:
+                    r = requests.get(
+                        f"https://graph.facebook.com/v26.0/{pid}",
+                        params={"fields": "id,name,fan_count,verification_status,link", "access_token": ptok},
+                        timeout=15
+                    ).json()
+
+                    def done():
+                        if fb_test_btn and fb_test_btn.winfo_exists():
+                            fb_test_btn.configure(state="normal", text="Test Connection")
+                        if "error" in r:
+                            err_msg = r["error"].get("message", "Unknown error")
+                            messagebox.showerror("Facebook Connection Failed", f"Meta API Error:\n\n{err_msg}")
+                            fb_auth_status_var.set("Invalid Token ❌")
+                        elif "name" in r:
+                            name = r.get("name")
+                            fans = r.get("fan_count", "N/A")
+                            messagebox.showinfo(
+                                "Facebook Connection OK",
+                                f"Successfully connected to Facebook Page!\n\n"
+                                f"• Page Name: {name}\n"
+                                f"• Page ID: {pid}\n"
+                                f"• Followers/Fans: {fans}\n"
+                                f"• Status: Valid & Active ✅"
+                            )
+                            fb_auth_status_var.set(f"Connected ✅ ({name})")
+                        else:
+                            messagebox.showwarning("Unexpected Response", str(r))
+
+                    self.after(0, done)
+                except Exception as e:
+                    def done_err():
+                        if fb_test_btn and fb_test_btn.winfo_exists():
+                            fb_test_btn.configure(state="normal", text="Test Connection")
+                        messagebox.showerror("Connection Error", f"Network error testing connection:\n\n{e}")
+                    self.after(0, done_err)
+
+            threading.Thread(target=_thread_test, daemon=True).start()
+
+        fb_test_btn = ttk.Button(fb_status_frame, text="Test Connection", bootstyle="info-outline", command=test_facebook_connection)
+        fb_test_btn.pack(side=RIGHT, padx=5)
+
         # Exchange Section
         ttk.Separator(tab_fb, orient="horizontal").pack(fill=X, pady=15)
         ttk.Label(tab_fb, text="Exchange Short-Lived User Token for Long-Lived Token", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 10))
@@ -4361,7 +4691,11 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
                         fb_long_user_token_var.set(long_user)
                         if page_token:
                             fb_token_var.set(page_token)
-                        messagebox.showinfo("Success", "Successfully exchanged and populated tokens!")
+                            instagram_token_var.set(page_token)
+                            db.set_setting(self.conn, "instagram_access_token", page_token)
+                        messagebox.showinfo("Success", "Successfully exchanged and populated tokens for Facebook & Instagram!")
+                        check_facebook_status()
+                        check_instagram_status()
 
                 self.after(0, done)
 
@@ -4383,7 +4717,8 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
                 short_token, long_user, page_token, err = run_facebook_oauth_flow(app_id, app_secret, page_id)
 
                 def done():
-                    login_btn.configure(state="normal", text="Login with Facebook")
+                    if login_btn and login_btn.winfo_exists():
+                        login_btn.configure(state="normal", text="Login with Facebook")
                     if err:
                         messagebox.showerror("Login Failed", err)
                     else:
@@ -4391,7 +4726,11 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
                         fb_long_user_token_var.set(long_user)
                         if page_token:
                             fb_token_var.set(page_token)
-                        messagebox.showinfo("Success", "Successfully logged in and retrieved tokens!")
+                            instagram_token_var.set(page_token)
+                            db.set_setting(self.conn, "instagram_access_token", page_token)
+                        messagebox.showinfo("Success", "Successfully logged in and retrieved tokens for Facebook & Instagram!")
+                        check_facebook_status()
+                        check_instagram_status()
 
                 self.after(0, done)
 
@@ -4417,7 +4756,11 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
                         messagebox.showerror("Failed to Get Page Token", err)
                     else:
                         fb_token_var.set(token)
-                        messagebox.showinfo("Success", "Successfully retrieved and populated Page Access Token!")
+                        instagram_token_var.set(token)
+                        db.set_setting(self.conn, "instagram_access_token", token)
+                        messagebox.showinfo("Success", "Successfully retrieved and populated Page Access Token for Facebook & Instagram!")
+                        check_facebook_status()
+                        check_instagram_status()
 
                 self.after(0, done)
 
@@ -4542,155 +4885,302 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
         auth_btn = ttk.Button(yt_auth_frame, text="Authorize YouTube", bootstyle="success", command=run_auth)
         auth_btn.pack(side=RIGHT)
 
-        # --- TAB: TikTok Integration ---
-        ttk.Label(tab_tiktok, text="TikTok Content Posting API Settings", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 10))
+        # --- TAB: Zernio (TikTok posting backend) ---
+        ttk.Label(tab_zernio, text="Zernio Unified Social API", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 10))
+        ttk.Label(
+            tab_zernio,
+            text="Deployments post to TikTok through Zernio instead of TikTok's own Content Posting API, "
+                 "since TikTok restricts unaudited developer apps used for a single/personal account to "
+                 "private-only posting. Zernio's app is already audited for public posting on your behalf.",
+            font=("Helvetica", 9),
+            bootstyle="secondary",
+            justify=LEFT,
+            wraplength=650
+        ).pack(anchor=W, pady=(0, 10))
 
-        tt_ck_frame = ttk.Frame(tab_tiktok)
-        tt_ck_frame.pack(fill=X, pady=5)
-        ttk.Label(tt_ck_frame, text="Client Key:", width=18, anchor=W).pack(side=LEFT)
-        tiktok_client_key_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_client_key", ""))
-        ttk.Entry(tt_ck_frame, textvariable=tiktok_client_key_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+        zn_key_frame = ttk.Frame(tab_zernio)
+        zn_key_frame.pack(fill=X, pady=8)
+        ttk.Label(zn_key_frame, text="Zernio API Key:", width=18, anchor=W).pack(side=LEFT)
+        zernio_api_key_var = tk.StringVar(value=db.get_setting(self.conn, "zernio_api_key", ""))
+        ttk.Entry(zn_key_frame, textvariable=zernio_api_key_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
 
-        tt_cs_frame = ttk.Frame(tab_tiktok)
-        tt_cs_frame.pack(fill=X, pady=5)
-        ttk.Label(tt_cs_frame, text="Client Secret:", width=18, anchor=W).pack(side=LEFT)
-        tiktok_client_secret_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_client_secret", ""))
-        ttk.Entry(tt_cs_frame, textvariable=tiktok_client_secret_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
-
-        tt_tok_frame = ttk.Frame(tab_tiktok)
-        tt_tok_frame.pack(fill=X, pady=5)
-        ttk.Label(tt_tok_frame, text="Access Token:", width=18, anchor=W).pack(side=LEFT)
-        tiktok_token_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_access_token", ""))
-        ttk.Entry(tt_tok_frame, textvariable=tiktok_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
-
-        tt_ref_frame = ttk.Frame(tab_tiktok)
-        tt_ref_frame.pack(fill=X, pady=5)
-        ttk.Label(tt_ref_frame, text="Refresh Token:", width=18, anchor=W).pack(side=LEFT)
-        tiktok_refresh_token_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_refresh_token", ""))
-        ttk.Entry(tt_ref_frame, textvariable=tiktok_refresh_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
-
-        tt_oid_frame = ttk.Frame(tab_tiktok)
-        tt_oid_frame.pack(fill=X, pady=5)
-        ttk.Label(tt_oid_frame, text="Open ID / Account:", width=18, anchor=W).pack(side=LEFT)
-        tiktok_open_id_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_open_id", ""))
-        ttk.Entry(tt_oid_frame, textvariable=tiktok_open_id_var).pack(side=LEFT, fill=X, expand=True, padx=5)
-
-        tt_uri_frame = ttk.Frame(tab_tiktok)
-        tt_uri_frame.pack(fill=X, pady=5)
-        ttk.Label(tt_uri_frame, text="Redirect URI (ngrok):", width=18, anchor=W).pack(side=LEFT)
-        tiktok_redirect_uri_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_redirect_uri", "http://localhost:8989/"))
-        ttk.Entry(tt_uri_frame, textvariable=tiktok_redirect_uri_var).pack(side=LEFT, fill=X, expand=True, padx=5)
-
-        tt_priv_frame = ttk.Frame(tab_tiktok)
-        tt_priv_frame.pack(fill=X, pady=5)
-        ttk.Label(tt_priv_frame, text="Privacy Level:", width=18, anchor=W).pack(side=LEFT)
+        zn_priv_frame = ttk.Frame(tab_zernio)
+        zn_priv_frame.pack(fill=X, pady=5)
+        ttk.Label(zn_priv_frame, text="Privacy Level:", width=18, anchor=W).pack(side=LEFT)
         tiktok_privacy_level_var = tk.StringVar(value=db.get_setting(self.conn, "tiktok_privacy_level", "SELF_ONLY"))
-        tt_priv_combo = ttk.Combobox(
-            tt_priv_frame,
+        ttk.Combobox(
+            zn_priv_frame,
             textvariable=tiktok_privacy_level_var,
             values=["SELF_ONLY", "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR"],
             state="readonly"
-        )
-        tt_priv_combo.pack(side=LEFT, fill=X, expand=True, padx=5)
+        ).pack(side=LEFT, fill=X, expand=True, padx=5)
 
-        tt_auth_frame = ttk.Frame(tab_tiktok)
-        tt_auth_frame.pack(fill=X, pady=15)
-        ttk.Label(tt_auth_frame, text="Authorization Status:", width=18, anchor=W).pack(side=LEFT)
+        zn_status_frame = ttk.Frame(tab_zernio)
+        zn_status_frame.pack(fill=X, pady=15)
+        ttk.Label(zn_status_frame, text="TikTok Account:", width=18, anchor=W).pack(side=LEFT)
 
-        tiktok_auth_status_var = tk.StringVar()
-        def check_tiktok_status():
-            from pipeline.upload import get_tiktok_client
-            creds, err = get_tiktok_client(self.conn)
-            if creds and (creds.get("access_token") or creds.get("refresh_token")):
-                tiktok_auth_status_var.set("Authorized ✅")
+        zernio_status_var = tk.StringVar()
+        def refresh_zernio_status():
+            from pipeline.upload import get_zernio_client
+            creds, err = get_zernio_client(self.conn)
+            if creds:
+                u = creds.get("username", "")
+                zernio_status_var.set(f"Connected ✅ (@{u})" if u else "Connected ✅")
             else:
-                tiktok_auth_status_var.set("Not Authorized ❌")
+                zernio_status_var.set("Not Connected ❌")
 
-        check_tiktok_status()
+        refresh_zernio_status()
 
-        tt_status_lbl = ttk.Label(tt_auth_frame, textvariable=tiktok_auth_status_var, font=("Helvetica", 10, "bold"))
-        tt_status_lbl.pack(side=LEFT, padx=5)
+        zn_status_lbl = ttk.Label(zn_status_frame, textvariable=zernio_status_var, font=("Helvetica", 10, "bold"))
+        zn_status_lbl.pack(side=LEFT, padx=5)
 
-        def update_tt_status_style(*args):
-            val = tiktok_auth_status_var.get()
-            if "✅" in val:
-                tt_status_lbl.configure(bootstyle="success")
-            else:
-                tt_status_lbl.configure(bootstyle="danger")
+        def update_zn_status_style(*args):
+            zn_status_lbl.configure(bootstyle="success" if "✅" in zernio_status_var.get() else "danger")
 
-        tiktok_auth_status_var.trace_add("write", update_tt_status_style)
-        update_tt_status_style()
+        zernio_status_var.trace_add("write", update_zn_status_style)
+        update_zn_status_style()
 
-        def run_tiktok_auth():
-            ck = tiktok_client_key_var.get().strip()
-            cs = tiktok_client_secret_var.get().strip()
-            if not ck or not cs:
-                messagebox.showwarning("Missing Fields", "Please enter TikTok Client Key and Client Secret first.")
+        def run_zernio_connect():
+            api_key = zernio_api_key_var.get().strip()
+            if not api_key:
+                messagebox.showwarning("Missing API Key", "Please enter your Zernio API Key first.")
                 return
 
-            tt_auth_btn.configure(state="disabled", text="Authorizing...")
+            zn_connect_btn.configure(state="disabled", text="Connecting...")
 
-            def _thread_tt_auth():
-                from pipeline.upload import run_tiktok_oauth_flow
-                r_uri = tiktok_redirect_uri_var.get().strip()
-                success, msg = run_tiktok_oauth_flow(self.conn, ck, cs, redirect_uri=r_uri, log_callback=print)
+            def _thread_zn_connect():
+                from pipeline.upload import run_zernio_tiktok_connect
+                success, msg = run_zernio_tiktok_connect(self.conn, api_key, log_callback=print)
 
                 def done():
-                    tt_auth_btn.configure(state="normal", text="Authorize TikTok")
+                    if zn_connect_btn and zn_connect_btn.winfo_exists():
+                        zn_connect_btn.configure(state="normal", text="Connect TikTok via Zernio")
                     if success:
                         messagebox.showinfo("Success", msg)
-                        tiktok_token_var.set(db.get_setting(self.conn, "tiktok_access_token", ""))
-                        tiktok_refresh_token_var.set(db.get_setting(self.conn, "tiktok_refresh_token", ""))
-                        tiktok_open_id_var.set(db.get_setting(self.conn, "tiktok_open_id", ""))
                     else:
-                        messagebox.showerror("Failed", msg)
-                    check_tiktok_status()
+                        messagebox.showerror("Connection Failed", msg)
+                    refresh_zernio_status()
 
                 self.after(0, done)
 
-            threading.Thread(target=_thread_tt_auth, daemon=True).start()
+            threading.Thread(target=_thread_zn_connect, daemon=True).start()
 
-        def run_tiktok_refresh():
-            ck = tiktok_client_key_var.get().strip()
-            cs = tiktok_client_secret_var.get().strip()
-            rt = tiktok_refresh_token_var.get().strip()
-            if not ck or not cs or not rt:
-                messagebox.showwarning("Missing Fields", "Please enter Client Key, Client Secret, and Refresh Token.")
-                return
-
-            tt_ref_btn.configure(state="disabled", text="Refreshing...")
-
-            def _thread_tt_ref():
-                from pipeline.upload import refresh_tiktok_token
-                new_tok, err = refresh_tiktok_token(self.conn, ck, cs, rt)
-
-                def done():
-                    tt_ref_btn.configure(state="normal", text="Refresh Token")
-                    if new_tok:
-                        tiktok_token_var.set(new_tok)
-                        messagebox.showinfo("Success", "TikTok Access Token successfully refreshed!")
-                    else:
-                        messagebox.showerror("Refresh Failed", err)
-                    check_tiktok_status()
-
-                self.after(0, done)
-
-            threading.Thread(target=_thread_tt_ref, daemon=True).start()
-
-        tt_ref_btn = ttk.Button(tt_auth_frame, text="Refresh Token", bootstyle="info-outline", command=run_tiktok_refresh)
-        tt_ref_btn.pack(side=RIGHT, padx=5)
-
-        tt_auth_btn = ttk.Button(tt_auth_frame, text="Authorize TikTok", bootstyle="success", command=run_tiktok_auth)
-        tt_auth_btn.pack(side=RIGHT, padx=5)
+        zn_connect_btn = ttk.Button(zn_status_frame, text="Connect TikTok via Zernio", bootstyle="success", command=run_zernio_connect)
+        zn_connect_btn.pack(side=RIGHT, padx=5)
 
         ttk.Label(
-            tab_tiktok,
-            text="💡 Tip: Create a Developer App on the TikTok for Developers portal and request 'video.upload' and 'video.publish' scopes for Content Posting API.",
+            tab_zernio,
+            text="💡 Tip: Sign up at zernio.com, copy your API Key above, then click 'Connect TikTok via Zernio' "
+                 "to authorize your TikTok account through Zernio's browser flow.",
             font=("Helvetica", 8, "italic"),
             bootstyle="secondary",
             justify=LEFT,
             wraplength=650
         ).pack(anchor=W, pady=(5, 10))
+
+        # --- TAB: Instagram Integration ---
+        ttk.Label(tab_ig, text="Instagram Content Publishing API Settings", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 10))
+
+        ig_app_frame = ttk.Frame(tab_ig)
+        ig_app_frame.pack(fill=X, pady=5)
+        ttk.Label(ig_app_frame, text="Meta App ID:", width=20, anchor=W).pack(side=LEFT)
+        instagram_app_id_var = tk.StringVar(value=db.get_setting(self.conn, "instagram_app_id", "") or db.get_setting(self.conn, "fb_app_id", ""))
+        ttk.Entry(ig_app_frame, textvariable=instagram_app_id_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        ig_sec_frame = ttk.Frame(tab_ig)
+        ig_sec_frame.pack(fill=X, pady=5)
+        ttk.Label(ig_sec_frame, text="Meta App Secret:", width=20, anchor=W).pack(side=LEFT)
+        instagram_app_secret_var = tk.StringVar(value=db.get_setting(self.conn, "instagram_app_secret", "") or db.get_setting(self.conn, "fb_app_secret", ""))
+        ttk.Entry(ig_sec_frame, textvariable=instagram_app_secret_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        ig_acc_frame = ttk.Frame(tab_ig)
+        ig_acc_frame.pack(fill=X, pady=5)
+        ttk.Label(ig_acc_frame, text="IG Account ID:", width=20, anchor=W).pack(side=LEFT)
+        instagram_account_id_var = tk.StringVar(value=db.get_setting(self.conn, "instagram_account_id", ""))
+        ttk.Entry(ig_acc_frame, textvariable=instagram_account_id_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        ig_user_frame = ttk.Frame(tab_ig)
+        ig_user_frame.pack(fill=X, pady=5)
+        ttk.Label(ig_user_frame, text="IG Username:", width=20, anchor=W).pack(side=LEFT)
+        instagram_username_var = tk.StringVar(value=db.get_setting(self.conn, "instagram_username", ""))
+        ttk.Entry(ig_user_frame, textvariable=instagram_username_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        ig_tok_frame = ttk.Frame(tab_ig)
+        ig_tok_frame.pack(fill=X, pady=5)
+        ttk.Label(ig_tok_frame, text="Access Token (60-day):", width=20, anchor=W).pack(side=LEFT)
+        instagram_token_var = tk.StringVar(value=db.get_setting(self.conn, "instagram_access_token", ""))
+        ttk.Entry(ig_tok_frame, textvariable=instagram_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        ig_auth_frame = ttk.Frame(tab_ig)
+        ig_auth_frame.pack(fill=X, pady=15)
+        ttk.Label(ig_auth_frame, text="Authorization Status:", width=20, anchor=W).pack(side=LEFT)
+
+        instagram_auth_status_var = tk.StringVar()
+        def check_instagram_status():
+            from pipeline.upload import get_instagram_client
+            client, err = get_instagram_client(self.conn)
+            if client and client.get("access_token") and client.get("account_id"):
+                u = client.get("username", "") or db.get_setting(self.conn, "instagram_username", "")
+                if u:
+                    instagram_auth_status_var.set(f"Authorized ✅ (@{u})")
+                else:
+                    instagram_auth_status_var.set("Authorized ✅")
+            else:
+                instagram_auth_status_var.set("Not Authorized ❌")
+
+        check_instagram_status()
+
+        ig_status_lbl = ttk.Label(ig_auth_frame, textvariable=instagram_auth_status_var, font=("Helvetica", 10, "bold"))
+        ig_status_lbl.pack(side=LEFT, padx=5)
+
+        def update_ig_status_style(*args):
+            val = instagram_auth_status_var.get()
+            if "✅" in val:
+                ig_status_lbl.configure(bootstyle="success")
+            else:
+                ig_status_lbl.configure(bootstyle="danger")
+
+        instagram_auth_status_var.trace_add("write", update_ig_status_style)
+        update_ig_status_style()
+
+        def run_instagram_test():
+            from pipeline.upload import get_instagram_client
+            client, err = get_instagram_client(self.conn)
+            if client:
+                u = client.get("username", "") or "Connected"
+                messagebox.showinfo("Connection OK", f"Successfully verified Instagram connection!\n\nAccount: @{u}\nAccount ID: {client.get('account_id')}")
+            else:
+                messagebox.showerror("Connection Failed", f"Could not connect to Instagram:\n\n{err}")
+            check_instagram_status()
+
+        ig_test_btn = ttk.Button(ig_auth_frame, text="Test Connection", bootstyle="info-outline", command=run_instagram_test)
+        ig_test_btn.pack(side=RIGHT, padx=5)
+
+        # Exchange Token Section (Primary Connection Method)
+        ttk.Separator(tab_ig, orient="horizontal").pack(fill=X, pady=12)
+        ttk.Label(tab_ig, text="Connect Instagram Account", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 5))
+
+        step1_frame = ttk.Frame(tab_ig)
+        step1_frame.pack(fill=X, pady=5)
+        ttk.Label(step1_frame, text="Step 1: Open Meta Explorer:", width=24, anchor=W).pack(side=LEFT)
+        def open_meta_explorer():
+            import webbrowser
+            webbrowser.open("https://developers.facebook.com/tools/explorer/")
+        ttk.Button(step1_frame, text="Open Meta Token Generator 🌐", bootstyle="secondary-outline", command=open_meta_explorer).pack(side=LEFT, padx=5)
+
+        step2_frame = ttk.Frame(tab_ig)
+        step2_frame.pack(fill=X, pady=5)
+        ttk.Label(step2_frame, text="Step 2: Paste User Token:", width=24, anchor=W).pack(side=LEFT)
+        ig_short_token_var = tk.StringVar()
+        ttk.Entry(step2_frame, textvariable=ig_short_token_var, show="*").pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        def exchange_ig_token_action():
+            tok = ig_short_token_var.get().strip()
+            if not tok:
+                messagebox.showwarning("Missing Token", "Please paste the User Token generated from Meta Graph API Explorer.")
+                return
+
+            ig_ex_btn.configure(state="disabled", text="Connecting...")
+
+            def _thread_ex():
+                from pipeline.upload import exchange_instagram_token
+                app_id = instagram_app_id_var.get().strip()
+                app_sec = instagram_app_secret_var.get().strip()
+                success, msg = exchange_instagram_token(self.conn, app_id, app_sec, tok)
+
+                def done():
+                    if ig_ex_btn and ig_ex_btn.winfo_exists():
+                        ig_ex_btn.configure(state="normal", text="Step 3: Connect Instagram ✅")
+                        if success:
+                            instagram_token_var.set(db.get_setting(self.conn, "instagram_access_token", ""))
+                            instagram_account_id_var.set(db.get_setting(self.conn, "instagram_account_id", ""))
+                            instagram_username_var.set(db.get_setting(self.conn, "instagram_username", ""))
+                            check_instagram_status()
+                            messagebox.showinfo("Success", f"Instagram connected successfully!\n\n{msg}")
+                        else:
+                            messagebox.showerror("Connection Error", f"Failed to connect Instagram:\n\n{msg}")
+                self.after(0, done)
+
+            threading.Thread(target=_thread_ex, daemon=True).start()
+
+        ig_ex_btn = ttk.Button(step2_frame, text="Step 3: Connect Instagram ✅", bootstyle="success", command=exchange_ig_token_action)
+        ig_ex_btn.pack(side=RIGHT, padx=5)
+
+        # Google Cloud Storage Fast-Path Section
+        ttk.Separator(tab_ig, orient="horizontal").pack(fill=X, pady=12)
+        ttk.Label(tab_ig, text="Google Cloud Storage Fast-Path Ingestion (Recommended)", font=("Helvetica", 11, "bold")).pack(anchor=W, pady=(0, 5))
+
+        ig_gcs_use_var = tk.BooleanVar(value=(db.get_setting(self.conn, "instagram_use_gcs", "1") in ("1", "true", "True")))
+        ttk.Checkbutton(tab_ig, text="Enable Google Cloud fast-path video ingestion (prevents Meta transcode timeouts)", variable=ig_gcs_use_var, bootstyle="round-toggle").pack(anchor=W, pady=5)
+
+        gcs_bkt_frame = ttk.Frame(tab_ig)
+        gcs_bkt_frame.pack(fill=X, pady=4)
+        ttk.Label(gcs_bkt_frame, text="GCS Bucket Name:", width=24, anchor=W).pack(side=LEFT)
+        instagram_gcs_bucket_var = tk.StringVar(value=db.get_setting(self.conn, "instagram_gcs_bucket", "music_to_sleep_to_video"))
+        ttk.Entry(gcs_bkt_frame, textvariable=instagram_gcs_bucket_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        gcs_key_frame = ttk.Frame(tab_ig)
+        gcs_key_frame.pack(fill=X, pady=4)
+        ttk.Label(gcs_key_frame, text="Service Account Key (.json):", width=24, anchor=W).pack(side=LEFT)
+        instagram_gcs_key_path_var = tk.StringVar(value=db.get_setting(self.conn, "instagram_gcs_key_path", "pipeline_data/gcs_service_account.json"))
+        ttk.Entry(gcs_key_frame, textvariable=instagram_gcs_key_path_var).pack(side=LEFT, fill=X, expand=True, padx=5)
+
+        def browse_gcs_key():
+            chosen = filedialog.askopenfilename(
+                title="Select Google Cloud Service Account JSON Key",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            if chosen:
+                instagram_gcs_key_path_var.set(chosen)
+
+        ttk.Button(gcs_key_frame, text="Browse...", bootstyle="secondary-outline", command=browse_gcs_key).pack(side=RIGHT, padx=5)
+
+        gcs_test_frame = ttk.Frame(tab_ig)
+        gcs_test_frame.pack(fill=X, pady=5)
+        
+        def run_gcs_test():
+            bkt = instagram_gcs_bucket_var.get().strip()
+            key_f = instagram_gcs_key_path_var.get().strip()
+            if not bkt or not key_f or not os.path.isfile(key_f):
+                messagebox.showerror("GCS Configuration Error", "Please provide a valid GCS Bucket Name and existing Service Account JSON Key file.")
+                return
+            try:
+                from google.cloud import storage
+                import datetime as dt_test
+                client = storage.Client.from_service_account_json(key_f)
+                bucket = client.bucket(bkt)
+                blob = bucket.blob("ping_test.txt")
+                blob.upload_from_string("GCS Ping OK", content_type="text/plain")
+                url = blob.generate_signed_url(version="v4", expiration=dt_test.timedelta(minutes=15), method="GET")
+                blob.delete()
+                messagebox.showinfo("GCS Connection OK", f"Successfully connected to Google Cloud Storage!\n\nBucket: {bkt}\nService Account verified and signed URLs active.")
+            except Exception as e:
+                messagebox.showerror("GCS Connection Failed", f"Could not connect to Google Cloud Storage:\n\n{e}")
+
+        ttk.Button(gcs_test_frame, text="Test GCS Connection ☁️", bootstyle="info-outline", command=run_gcs_test).pack(side=LEFT)
+
+        ttk.Label(
+            tab_ig,
+            text="💡 Quick Instructions:\n"
+                 "1. Google Cloud Storage allows Meta to pull videos directly at multi-gigabit speeds, eliminating the 15-minute timeout.\n"
+                 "2. Temporary videos are automatically deleted from your Google Cloud bucket as soon as publishing finishes.",
+            font=("Helvetica", 8, "italic"),
+            bootstyle="secondary",
+            justify=LEFT,
+            wraplength=650
+        ).pack(anchor=W, pady=(10, 10))
+
+        ttk.Label(
+            tab_ig,
+            text="💡 Quick Instructions:\n"
+                 "1. Click 'Open Meta Token Generator' to open Meta's Graph API Explorer in your browser.\n"
+                 "2. Make sure your App is selected, and in 'Permissions' add: 'instagram_basic', 'instagram_content_publish', and 'pages_show_list'.\n"
+                 "3. Click 'Generate Access Token', copy the generated token, paste it in Step 2 above, and click 'Step 3: Connect Instagram'.",
+            font=("Helvetica", 8, "italic"),
+            bootstyle="secondary",
+            justify=LEFT,
+            wraplength=650
+        ).pack(anchor=W, pady=(10, 10))
 
         # --- TAB: Default Templates ---
         ttk.Label(
@@ -4741,6 +5231,12 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
         tiktok_desc_tpl_txt.pack(fill=X, pady=(0, 10))
         tiktok_desc_tpl_txt.insert("1.0", db.get_setting(self.conn, "tiktok_desc_template", "{{body}}\n\n#music #sleep #relaxing #fyp #foryou"))
 
+        # Instagram Reel Caption
+        ttk.Label(tab_tpl, text="Default Instagram Reel Caption Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
+        ig_caption_tpl_txt = tk.Text(tab_tpl, height=3, wrap="word", bg="#2b2b3d", fg="#e0e0e0", insertbackground="#e0e0e0")
+        ig_caption_tpl_txt.pack(fill=X, pady=(0, 10))
+        ig_caption_tpl_txt.insert("1.0", db.get_setting(self.conn, "instagram_caption_template", "{{body}}\n\nTitle: {{title}}\n\nTo watch the full-length 4K video, follow the link in bio. 💤✨\n\n#music #sleep #relaxing #reels #ambient\n\n© {{year}} Music To Sleep To. All Rights Reserved.\nMade with the help of Suno."))
+
         # YT Short Comment
         ttk.Label(tab_tpl, text="Default YouTube Short Comment Template:", font=("Helvetica", 9, "bold")).pack(anchor=W, pady=(5, 2))
         short_comment_tpl_var = tk.StringVar(value=db.get_setting(self.conn, "short_comment_template", "Watch the full-length 4K video here: {{youtube-url}} 💤✨"))
@@ -4773,13 +5269,16 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
             db.set_setting(self.conn, "fb_app_id", fb_app_id_var.get().strip())
             db.set_setting(self.conn, "fb_app_secret", fb_app_secret_var.get().strip())
             db.set_setting(self.conn, "yt_client_secrets", yt_secrets_var.get().strip())
-            db.set_setting(self.conn, "tiktok_client_key", tiktok_client_key_var.get().strip())
-            db.set_setting(self.conn, "tiktok_client_secret", tiktok_client_secret_var.get().strip())
-            db.set_setting(self.conn, "tiktok_access_token", tiktok_token_var.get().strip())
-            db.set_setting(self.conn, "tiktok_refresh_token", tiktok_refresh_token_var.get().strip())
-            db.set_setting(self.conn, "tiktok_open_id", tiktok_open_id_var.get().strip())
-            db.set_setting(self.conn, "tiktok_redirect_uri", tiktok_redirect_uri_var.get().strip())
             db.set_setting(self.conn, "tiktok_privacy_level", tiktok_privacy_level_var.get().strip() or "SELF_ONLY")
+            db.set_setting(self.conn, "zernio_api_key", zernio_api_key_var.get().strip())
+            db.set_setting(self.conn, "instagram_app_id", instagram_app_id_var.get().strip())
+            db.set_setting(self.conn, "instagram_app_secret", instagram_app_secret_var.get().strip())
+            db.set_setting(self.conn, "instagram_access_token", instagram_token_var.get().strip())
+            db.set_setting(self.conn, "instagram_account_id", instagram_account_id_var.get().strip())
+            db.set_setting(self.conn, "instagram_username", instagram_username_var.get().strip())
+            db.set_setting(self.conn, "instagram_use_gcs", "1" if ig_gcs_use_var.get() else "0")
+            db.set_setting(self.conn, "instagram_gcs_bucket", instagram_gcs_bucket_var.get().strip())
+            db.set_setting(self.conn, "instagram_gcs_key_path", instagram_gcs_key_path_var.get().strip())
             db.set_setting(self.conn, "fb_post_template", fb_tpl_txt.get("1.0", "end-1c").strip())
             db.set_setting(self.conn, "yt_title_template", yt_title_tpl_var.get().strip())
             db.set_setting(self.conn, "yt_desc_template", yt_desc_tpl_txt.get("1.0", "end-1c").strip())
@@ -4787,6 +5286,7 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
             db.set_setting(self.conn, "short_desc_template", short_desc_tpl_txt.get("1.0", "end-1c").strip())
             db.set_setting(self.conn, "tiktok_title_template", tiktok_title_tpl_var.get().strip())
             db.set_setting(self.conn, "tiktok_desc_template", tiktok_desc_tpl_txt.get("1.0", "end-1c").strip())
+            db.set_setting(self.conn, "instagram_caption_template", ig_caption_tpl_txt.get("1.0", "end-1c").strip())
             db.set_setting(self.conn, "short_comment_template", short_comment_tpl_var.get().strip())
             db.set_setting(self.conn, "default_tags", default_tags_var.get().strip())
             db.set_setting(self.conn, "gemini_quote_template", gemini_quote_tpl_txt.get("1.0", "end-1c").strip())
@@ -4798,9 +5298,9 @@ Return ONLY the plain text of the pill badge. Do not wrap in quotation marks, do
             dlg.destroy()
 
         ttk.Button(
-            f, text="Save Settings", bootstyle="success",
+            settings_footer, text="Save Settings", bootstyle="success",
             command=save,
-        ).pack(anchor=E, pady=15)
+        ).pack(anchor=E)
 
     # ------------------------------------------------------------------
     # Services

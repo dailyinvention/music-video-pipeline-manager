@@ -21,10 +21,11 @@ from pathlib import Path
 from pipeline import db
 from pipeline import get_binary_path
 
-# Root of the music_video project and engine directory
+# Root of the music_video project and engine/tools directories
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ENGINE_DIR = os.path.join(_ROOT_DIR, "engine")
-for _p in (_ROOT_DIR, _ENGINE_DIR):
+_TOOLS_DIR = os.path.join(_ROOT_DIR, "tools")
+for _p in (_ROOT_DIR, _ENGINE_DIR, _TOOLS_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -88,6 +89,33 @@ def _run_python_script(script_name: str, args: list[str], log_callback=None) -> 
     return success, combined.strip()
 
 
+def _fix_audio_before_merge(audio_path: str, log_callback=None) -> str:
+    """
+    Run tools/fix_audio_bass.py on a master audio file before it gets merged
+    into a video: removes bass/kick distortion, de-clicks digital blips at
+    the start/end, trims trailing dead air, and applies MP3Gain normalization.
+    Skips files already processed (identified by an existing ".original"
+    backup next to them) so the same file isn't fixed twice -- e.g. when the
+    Facebook and YouTube merges share the same source audio.
+    """
+    if not audio_path or not os.path.isfile(audio_path):
+        return audio_path
+
+    p = Path(audio_path)
+    backup_path = p.parent / f"{p.stem}.original{p.suffix}"
+    if backup_path.exists():
+        if log_callback:
+            log_callback(f"Audio already bass-fixed previously, skipping: {p.name}")
+        return audio_path
+
+    if log_callback:
+        log_callback(f"Fixing bass distortion, blips, and gain on: {p.name}...")
+    ok, log = _run_python_script("fix_audio_bass", [audio_path], log_callback)
+    if not ok and log_callback:
+        log_callback(f"Warning: audio fix step failed for {p.name}, continuing with original file:\n{log}")
+    return audio_path
+
+
 STEP_NAMES = {
     1: "Merge FB Video",
     2: "Upscale FB Video",
@@ -103,6 +131,7 @@ STEP_NAMES = {
     12: "Upload YouTube Short",
     13: "Create Spotify Canvas",
     14: "Upload TikTok Video",
+    15: "Upload Instagram Reel",
 }
 
 
@@ -332,6 +361,8 @@ class PipelineWorker:
         if not merge_audio or not os.path.isfile(merge_audio):
             raise RuntimeError("Audio file for Facebook Video Merge not found")
 
+        merge_audio = _fix_audio_before_merge(merge_audio, log_callback)
+
         cmd_fb = [
             get_binary_path("ffmpeg"), "-y",
             "-i", fb_video,
@@ -395,6 +426,8 @@ class PipelineWorker:
             raise RuntimeError(f"YouTube Video (Long) file not found: {yt_video}")
         if not audio or not os.path.isfile(audio):
             raise RuntimeError(f"Audio file not found: {audio}")
+
+        audio = _fix_audio_before_merge(audio, log_callback)
 
         cmd_yt = [
             get_binary_path("ffmpeg"), "-y",
